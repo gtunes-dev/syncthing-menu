@@ -1,13 +1,16 @@
 import AppKit
 
-/// Owns the menu-bar status item and its dropdown menu.
-///
-/// For now this renders a mostly static menu. As the app grows it will reflect
-/// live Syncthing state (syncing / idle / error) in the icon and status line.
+/// Owns the menu-bar status item and its dropdown menu, and reflects the live
+/// daemon state (status line + whether "Open Web UI" is available).
 final class StatusItemController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private let onOpenSettings: () -> Void
+
+    private var statusMenuItem: NSMenuItem?
+    private var webUIItem: NSMenuItem?
+    /// The managed daemon's GUI URL when running; nil otherwise.
+    private var webUIURL: String?
 
     init(onOpenSettings: @escaping () -> Void) {
         self.onOpenSettings = onOpenSettings
@@ -27,13 +30,13 @@ final class StatusItemController: NSObject {
     }
 
     private func buildMenu() {
-        // We manage item enablement ourselves: until we run our own daemon there
-        // is nothing legitimate to open or report.
+        // We manage item enablement ourselves.
         menu.autoenablesItems = false
 
         let status = NSMenuItem(title: "Syncthing: not running", action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
+        statusMenuItem = status
 
         menu.addItem(.separator())
 
@@ -41,10 +44,8 @@ final class StatusItemController: NSObject {
                                  action: #selector(openWebUI),
                                  keyEquivalent: "o")
         webUI.target = self
-        // Disabled until we manage our own daemon. Its GUI address will come from
-        // that daemon's config.xml — never a hardcoded default, which would open
-        // whatever unrelated Syncthing happens to be on that port.
-        webUI.isEnabled = false
+        webUI.isEnabled = false   // enabled once the daemon is running (see update)
+        webUIItem = webUI
 
         let settingsItem = menu.addItem(withTitle: "Settings…",
                                         action: #selector(openSettings),
@@ -59,21 +60,39 @@ final class StatusItemController: NSObject {
         quit.target = self
     }
 
+    /// Reflect the daemon's current state in the menu. Call on the main thread.
+    func update(daemonState: SyncthingProcess.State) {
+        switch daemonState {
+        case .stopped:
+            statusMenuItem?.title = "Syncthing: not running"
+            webUIURL = nil
+            webUIItem?.isEnabled = false
+        case .starting:
+            statusMenuItem?.title = "Syncthing: starting…"
+            webUIURL = nil
+            webUIItem?.isEnabled = false
+        case let .running(guiURL):
+            statusMenuItem?.title = "Syncthing: running"
+            webUIURL = guiURL
+            webUIItem?.isEnabled = true
+        case let .failed(message):
+            statusMenuItem?.title = "Syncthing: \(message)"
+            webUIURL = nil
+            webUIItem?.isEnabled = false
+        }
+    }
+
     @objc private func openSettings() {
         onOpenSettings()
     }
 
     @objc private func openWebUI() {
-        // TODO: open the managed daemon's actual GUI address, read from its
-        // config.xml (see design). The item stays disabled until the daemon
-        // foundation can supply that address; the constant below is only a
-        // placeholder and must not ship as the real source of the URL.
-        guard let url = URL(string: "http://127.0.0.1:8384") else { return }
+        guard let address = webUIURL, let url = URL(string: address) else { return }
         NSWorkspace.shared.open(url)
     }
 
     @objc private func quit() {
-        // TODO: stop the syncthing subprocess gracefully before terminating.
+        // The daemon is stopped via applicationWillTerminate before exit.
         NSApplication.shared.terminate(nil)
     }
 }

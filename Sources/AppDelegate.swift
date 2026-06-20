@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindowController: SettingsWindowController?
     private let loginItem = LoginItemController()
     private let releaseUpdater = ReleaseUpdater()
+    private let syncthingProcess = SyncthingProcess()
 
     // Update sources. Mocked for now; the real Syncthing (REST) and app (Sparkle)
     // sources will replace these and conform to the same `UpdateSource` surface.
@@ -34,12 +35,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onOpenSettings: { settingsController.show() }
         )
 
-        // Bootstrap: ensure the Syncthing binary is downloaded + SHA-256 verified
-        // into our private support dir. Launching/supervising it is the next step.
+        // Reflect the daemon's live state in the menu.
+        syncthingProcess.onStateChange = { [weak self] state in
+            self?.statusItemController?.update(daemonState: state)
+        }
+
+        // Bootstrap the binary (download + verify if needed), then launch the
+        // managed daemon.
         Task {
             do {
                 let url = try await releaseUpdater.bootstrapIfNeeded()
                 NSLog("Syncthing binary ready at \(url.path)")
+                DispatchQueue.main.async { self.syncthingProcess.start() }
             } catch {
                 NSLog("Syncthing bootstrap failed: \(error)")
             }
@@ -47,6 +54,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // TODO: stop the syncthing subprocess cleanly here once SyncthingProcess exists.
+        syncthingProcess.stop()
     }
 }
