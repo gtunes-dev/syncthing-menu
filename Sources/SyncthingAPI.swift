@@ -1,0 +1,72 @@
+import Foundation
+
+/// A thin async client for the managed Syncthing daemon's REST API. Every request
+/// authenticates with the daemon's API key via the `X-API-Key` header.
+///
+/// Endpoints and response shapes here are verified against a live v2.1.1 daemon.
+struct SyncthingAPI {
+    let baseURL: URL    // e.g. http://127.0.0.1:60533
+    let apiKey: String
+
+    enum APIError: Error, Equatable {
+        case badURL
+        case http(Int)
+    }
+
+    // MARK: System
+
+    /// `GET /rest/system/version` → the running version, e.g. "v2.1.1".
+    func systemVersion() async throws -> String {
+        struct Response: Decodable { let version: String }
+        let data = try await send("/rest/system/version", method: "GET")
+        return try JSONDecoder().decode(Response.self, from: data).version
+    }
+
+    /// `GET /rest/system/upgrade` → upgrade availability. `newer` and `majorNewer`
+    /// are mutually exclusive: Syncthing surfaces a pending minor before a major, so
+    /// `majorNewer` only becomes true once no minor upgrade is pending.
+    struct UpgradeInfo: Decodable, Equatable {
+        let running: String
+        let latest: String
+        let newer: Bool
+        let majorNewer: Bool
+    }
+
+    func upgradeInfo() async throws -> UpgradeInfo {
+        let data = try await send("/rest/system/upgrade", method: "GET")
+        return try JSONDecoder().decode(UpgradeInfo.self, from: data)
+    }
+
+    /// `POST /rest/system/upgrade` → upgrade to the latest available version and
+    /// restart. Used only on explicit user consent (majors are always gated).
+    func performUpgrade() async throws {
+        _ = try await send("/rest/system/upgrade", method: "POST")
+    }
+
+    // MARK: Config
+
+    /// `PATCH /rest/config/options` → set the daemon's auto-upgrade interval. We set
+    /// it to 0 to disable the daemon's own self-upgrader (we own updates).
+    func setAutoUpgradeIntervalH(_ hours: Int) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["autoUpgradeIntervalH": hours])
+        _ = try await send("/rest/config/options", method: "PATCH", body: body)
+    }
+
+    // MARK: - Request plumbing
+
+    private func send(_ path: String, method: String, body: Data? = nil) async throws -> Data {
+        guard let url = URL(string: path, relativeTo: baseURL) else { throw APIError.badURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
+        if let body {
+            request.httpBody = body
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw APIError.http(http.statusCode)
+        }
+        return data
+    }
+}
