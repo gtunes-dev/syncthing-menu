@@ -10,6 +10,9 @@ xcuserdata/
 *.xccheckout
 *.moved-aside
 
+# Build server (xcode-build-server output — generated; regenerate with `xcode-build-server config -project SyncthingMenu.xcodeproj -scheme SyncthingMenu`)
+buildServer.json
+
 # Swift Package Manager (in case it's added later)
 .build/
 .swiftpm/

@@ -1,0 +1,23 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build (Debug)",
+      "detail": "Compile SyncthingMenu.app, ad-hoc signed, with deterministic output in build/Debug.",
+      "type": "shell",
+      "command": "xcodebuild -project SyncthingMenu.xcodeproj -scheme SyncthingMenu -configuration Debug CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES CONFIGURATION_BUILD_DIR=\"${workspaceFolder}/build/Debug\" build",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run",
+      "detail": "Build, then launch the app in the foreground so console logs (print/os_log) appear here. Stop with Ctrl+C or the app's Quit menu.",
+      "type": "shell",
+      "command": "\"${workspaceFolder}/build/Debug/SyncthingMenu.app/Contents/MacOS/SyncthingMenu\"",
+      "dependsOn": "Build (Debug)",
+      "dependsOrder": "sequence",
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
+    }
+  ]
+}
