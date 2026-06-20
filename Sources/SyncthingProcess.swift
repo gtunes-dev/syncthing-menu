@@ -4,8 +4,11 @@ import Darwin
 /// Launches and supervises the managed Syncthing daemon as a child process.
 ///
 /// Runs an *isolated* instance: its own home directory (config + database) under
-/// our app-support directory, on its own GUI port, so it never collides with any
-/// other Syncthing the user may be running.
+/// our app-support directory. We **never write Syncthing's `config.xml`** — we let
+/// Syncthing pick free GUI/listen ports (it does this itself), read the API key it
+/// generated, and pin the GUI port via a CLI flag using a value persisted on *our*
+/// side. The one option we enforce (`autoUpgradeIntervalH = 0`) is applied later via
+/// the REST API (B3), not by editing the file.
 final class SyncthingProcess {
     enum State: Equatable {
         case stopped
@@ -21,10 +24,17 @@ final class SyncthingProcess {
         didSet { onStateChange?(state) }
     }
 
+    /// The daemon's API key, read from `config.xml` once running. Used by the
+    /// (forthcoming) REST client.
+    private(set) var apiKey: String?
+
     private let binaryURL: URL
     private let homeURL: URL
     private var process: Process?
     private var intentionalStop = false
+
+    /// Where we persist *our* chosen GUI port (not in Syncthing's config).
+    private static let guiPortDefaultsKey = "syncthing.managedGUIPort"
 
     init(binaryURL: URL = ReleaseUpdater.installedBinaryURL,
          homeURL: URL = SyncthingProcess.defaultHomeURL) {
@@ -37,31 +47,89 @@ final class SyncthingProcess {
             .appendingPathComponent("Syncthing Menu/home", isDirectory: true)
     }
 
-    /// Launch the daemon. Safe to call once; no-op if already running.
+    /// Launch the daemon. No-op if already running.
     func start() {
         guard process == nil else { return }
         state = .starting
         intentionalStop = false
 
-        do {
-            try FileManager.default.createDirectory(at: homeURL, withIntermediateDirectories: true)
-        } catch {
-            state = .failed("Couldn't create home dir: \(error.localizedDescription)")
-            return
+        // Generate (first run) can block briefly, so do prep off-main; the actual
+        // launch returns to main to keep process state consistent.
+        DispatchQueue.global().async { [weak self] in
+            guard let self else { return }
+            do {
+                let plan = try self.prepareLaunch()
+                DispatchQueue.main.async { self.launchServe(plan: plan) }
+            } catch {
+                DispatchQueue.main.async {
+                    self.state = .failed("Setup failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    /// Stop the daemon cleanly (SIGTERM) and wait for it to exit.
+    func stop() {
+        guard let proc = process else { return }
+        intentionalStop = true
+        proc.terminate()
+        proc.waitUntilExit()
+        process = nil
+        state = .stopped
+    }
+
+    // MARK: - Launch planning (no config writes)
+
+    private struct LaunchPlan {
+        let apiKey: String?
+        let guiURL: String
+        /// When set, passed via `--gui-address` (used for the "dynamic" case).
+        let guiAddressOverride: String?
+    }
+
+    private func prepareLaunch() throws -> LaunchPlan {
+        let fm = FileManager.default
+        try fm.createDirectory(at: homeURL, withIntermediateDirectories: true)
+
+        let configURL = homeURL.appendingPathComponent("config.xml")
+        if !fm.fileExists(atPath: configURL.path) {
+            try runGenerate()
         }
 
-        let guiAddress = "127.0.0.1:\(Self.chooseGUIPort())"
+        let config = try SyncthingConfig(contentsOf: configURL)
+
+        // Respect a concrete, user/Syncthing-set GUI address. Otherwise the config
+        // says "dynamic", so we pin a stable port of our own (persisted on our side)
+        // and pass it via --gui-address. Either way we never write Syncthing's config.
+        if let concrete = config.concreteGUIURL {
+            return LaunchPlan(apiKey: config.apiKey, guiURL: concrete, guiAddressOverride: nil)
+        } else {
+            let address = "127.0.0.1:\(persistedGUIPort())"
+            return LaunchPlan(apiKey: config.apiKey,
+                              guiURL: "http://\(address)",
+                              guiAddressOverride: address)
+        }
+    }
+
+    private func runGenerate() throws {
         let proc = Process()
         proc.executableURL = binaryURL
-        proc.arguments = [
-            "serve",
-            "--home", homeURL.path,
-            "--no-browser",
-            "--gui-address", guiAddress,
-        ]
+        proc.arguments = ["generate", "--home", homeURL.path]
+        try proc.run()
+        proc.waitUntilExit()
+    }
 
-        // Mirror the daemon's stdout/stderr into the log for now (status/UI wiring
-        // beyond the menu line comes later).
+    // MARK: - Launch
+
+    private func launchServe(plan: LaunchPlan) {
+        let proc = Process()
+        proc.executableURL = binaryURL
+        var args = ["serve", "--home", homeURL.path, "--no-browser"]
+        if let override = plan.guiAddressOverride {
+            args += ["--gui-address", override]
+        }
+        proc.arguments = args
+
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = pipe
@@ -88,32 +156,28 @@ final class SyncthingProcess {
         do {
             try proc.run()
             process = proc
-            state = .running(guiURL: "http://\(guiAddress)")
-            NSLog("Syncthing daemon started at http://\(guiAddress) (home: \(homeURL.path))")
+            apiKey = plan.apiKey
+            state = .running(guiURL: plan.guiURL)
+            NSLog("Syncthing daemon started at \(plan.guiURL) (home: \(homeURL.path))")
         } catch {
             state = .failed("Couldn't launch Syncthing: \(error.localizedDescription)")
         }
     }
 
-    /// Stop the daemon cleanly (SIGTERM) and wait for it to exit.
-    func stop() {
-        guard let proc = process else { return }
-        intentionalStop = true
-        proc.terminate()
-        proc.waitUntilExit()
-        process = nil
-        state = .stopped
+    // MARK: - GUI port persistence (our side, never Syncthing's config)
+
+    private func persistedGUIPort() -> UInt16 {
+        let defaults = UserDefaults.standard
+        let stored = defaults.integer(forKey: Self.guiPortDefaultsKey)
+        if stored > 0, let port = UInt16(exactly: stored), Self.isPortFree(port) {
+            return port
+        }
+        let port = Self.findFreePort() ?? 8384
+        defaults.set(Int(port), forKey: Self.guiPortDefaultsKey)
+        return port
     }
 
-    // MARK: - Port selection
-
-    /// Prefer Syncthing's default GUI port; fall back to a free ephemeral port if
-    /// it's already taken (e.g. another Syncthing is running). Ships as 8384 for a
-    /// sole instance; auto-dodges conflicts during development.
-    private static func chooseGUIPort() -> UInt16 {
-        let preferred: UInt16 = 8384
-        return isPortFree(preferred) ? preferred : (findFreePort() ?? 8385)
-    }
+    // MARK: - Port helpers
 
     private static func isPortFree(_ port: UInt16) -> Bool {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
