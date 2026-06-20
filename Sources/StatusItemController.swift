@@ -2,13 +2,15 @@ import AppKit
 
 /// Owns the menu-bar status item and its dropdown menu.
 ///
-/// For now this just renders a static menu. As the app grows it will reflect
+/// For now this renders a mostly static menu. As the app grows it will reflect
 /// live Syncthing state (syncing / idle / error) in the icon and status line.
 final class StatusItemController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
+    private let onOpenSettings: () -> Void
 
-    override init() {
+    init(onOpenSettings: @escaping () -> Void) {
+        self.onOpenSettings = onOpenSettings
         super.init()
         configureButton()
         buildMenu()
@@ -36,12 +38,21 @@ final class StatusItemController: NSObject {
                                  keyEquivalent: "o")
         webUI.target = self
 
+        let settingsItem = menu.addItem(withTitle: "Settings…",
+                                        action: #selector(openSettings),
+                                        keyEquivalent: ",")
+        settingsItem.target = self
+
         menu.addItem(.separator())
 
         let quit = menu.addItem(withTitle: "Quit Syncthing Menu",
                                 action: #selector(quit),
                                 keyEquivalent: "q")
         quit.target = self
+    }
+
+    @objc private func openSettings() {
+        onOpenSettings()
     }
 
     @objc private func openWebUI() {
