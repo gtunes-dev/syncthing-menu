@@ -17,10 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return MockUpdateSource(name: "App", currentVersion: version, checkResult: .upToDate)
     }()
 
-    private lazy var syncthingUpdateSource: UpdateSource =
-        MockUpdateSource(name: "Syncthing",
-                         currentVersion: "v2.1.1",
-                         checkResult: .available(version: "v2.1.2", isMajor: false))
+    private let syncthingUpdateSource = SyncthingUpdateSource()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let settingsController = SettingsWindowController(
@@ -35,9 +32,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onOpenSettings: { settingsController.show() }
         )
 
-        // Reflect the daemon's live state in the menu.
+        // Reflect the daemon's live state in the menu, and connect/disconnect the
+        // Syncthing update source as the daemon comes up / goes down.
         syncthingProcess.onStateChange = { [weak self] state in
-            self?.statusItemController?.update(daemonState: state)
+            guard let self else { return }
+            self.statusItemController?.update(daemonState: state)
+            switch state {
+            case let .running(guiURL):
+                if let key = self.syncthingProcess.apiKey {
+                    self.syncthingUpdateSource.connect(baseURL: guiURL, apiKey: key)
+                }
+            case .stopped, .starting, .failed:
+                self.syncthingUpdateSource.disconnect()
+            }
         }
 
         // Bootstrap the binary (download + verify if needed), then launch the
