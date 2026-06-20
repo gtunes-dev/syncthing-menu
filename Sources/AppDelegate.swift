@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: StatusItemController?
     private var settingsWindowController: SettingsWindowController?
     private let loginItem = LoginItemController()
+    private let releaseUpdater = ReleaseUpdater()
 
     // Update sources. Mocked for now; the real Syncthing (REST) and app (Sparkle)
     // sources will replace these and conform to the same `UpdateSource` surface.
@@ -32,6 +33,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItemController = StatusItemController(
             onOpenSettings: { settingsController.show() }
         )
+
+        // Bootstrap: ensure the Syncthing binary is downloaded + SHA-256 verified
+        // into our private support dir. Launching/supervising it is the next step.
+        Task {
+            do {
+                let url = try await releaseUpdater.bootstrapIfNeeded()
+                NSLog("Syncthing binary ready at \(url.path)")
+            } catch {
+                NSLog("Syncthing bootstrap failed: \(error)")
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
