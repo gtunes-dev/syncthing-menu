@@ -10,6 +10,7 @@ struct SettingsView: View {
     @ObservedObject var settings: Settings
     @ObservedObject var appSource: UpdateSource
     @ObservedObject var syncthingSource: UpdateSource
+    @ObservedObject var loginItem: LoginItemController
 
     private var appVersion: String {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "—"
@@ -43,6 +44,10 @@ struct SettingsView: View {
 
                 Divider()
 
+                Toggle("Open at login", isOn: Binding(
+                    get: { loginItem.isEnabled },
+                    set: { loginItem.setEnabled($0) }
+                ))
                 Toggle("Automatically check for updates",
                        isOn: $settings.appAutoCheckEnabled)
             }

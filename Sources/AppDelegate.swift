@@ -6,6 +6,7 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: StatusItemController?
     private var settingsWindowController: SettingsWindowController?
+    private let loginItem = LoginItemController()
 
     // Update sources. Mocked for now; the real Syncthing (REST) and app (Sparkle)
     // sources will replace these and conform to the same `UpdateSource` surface.
@@ -23,7 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let settingsController = SettingsWindowController(
             settings: .shared,
             appSource: appUpdateSource,
-            syncthingSource: syncthingUpdateSource
+            syncthingSource: syncthingUpdateSource,
+            loginItem: loginItem
         )
         settingsWindowController = settingsController
 

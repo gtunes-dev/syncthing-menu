@@ -27,6 +27,10 @@ final class StatusItemController: NSObject {
     }
 
     private func buildMenu() {
+        // We manage item enablement ourselves: until we run our own daemon there
+        // is nothing legitimate to open or report.
+        menu.autoenablesItems = false
+
         let status = NSMenuItem(title: "Syncthing: not running", action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
@@ -37,6 +41,10 @@ final class StatusItemController: NSObject {
                                  action: #selector(openWebUI),
                                  keyEquivalent: "o")
         webUI.target = self
+        // Disabled until we manage our own daemon. Its GUI address will come from
+        // that daemon's config.xml — never a hardcoded default, which would open
+        // whatever unrelated Syncthing happens to be on that port.
+        webUI.isEnabled = false
 
         let settingsItem = menu.addItem(withTitle: "Settings…",
                                         action: #selector(openSettings),
@@ -56,8 +64,10 @@ final class StatusItemController: NSObject {
     }
 
     @objc private func openWebUI() {
-        // TODO: only enable this once the daemon is running; the GUI address is
-        // configurable but defaults to http://127.0.0.1:8384.
+        // TODO: open the managed daemon's actual GUI address, read from its
+        // config.xml (see design). The item stays disabled until the daemon
+        // foundation can supply that address; the constant below is only a
+        // placeholder and must not ship as the real source of the URL.
         guard let url = URL(string: "http://127.0.0.1:8384") else { return }
         NSWorkspace.shared.open(url)
     }

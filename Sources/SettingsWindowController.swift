@@ -11,11 +11,16 @@ final class SettingsWindowController {
     private let settings: Settings
     private let appSource: UpdateSource
     private let syncthingSource: UpdateSource
+    private let loginItem: LoginItemController
 
-    init(settings: Settings, appSource: UpdateSource, syncthingSource: UpdateSource) {
+    init(settings: Settings,
+         appSource: UpdateSource,
+         syncthingSource: UpdateSource,
+         loginItem: LoginItemController) {
         self.settings = settings
         self.appSource = appSource
         self.syncthingSource = syncthingSource
+        self.loginItem = loginItem
     }
 
     /// Show the settings window, creating it on first use and re-focusing it
@@ -24,7 +29,8 @@ final class SettingsWindowController {
         if window == nil {
             let root = SettingsView(settings: settings,
                                     appSource: appSource,
-                                    syncthingSource: syncthingSource)
+                                    syncthingSource: syncthingSource,
+                                    loginItem: loginItem)
             let hosting = NSHostingController(rootView: root)
             let newWindow = NSWindow(contentViewController: hosting)
             newWindow.title = "Syncthing Menu Settings"
