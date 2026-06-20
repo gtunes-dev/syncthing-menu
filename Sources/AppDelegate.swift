@@ -17,7 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return MockUpdateSource(name: "App", currentVersion: version, checkResult: .upToDate)
     }()
 
-    private let syncthingUpdateSource = SyncthingUpdateSource()
+    private let syncthingUpdateSource = SyncthingUpdateSource(settings: .shared)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let settingsController = SettingsWindowController(
