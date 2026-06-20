@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+
+# Xcode — per-user state and build products
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+
+# Swift Package Manager (in case it's added later)
+.build/
+.swiftpm/
+
+# Secrets & signing material — MUST never be committed
+*.p12
+*.cer
+*.mobileprovision
+*.provisionprofile
+AuthKey_*.p8
+.env
+.env.*

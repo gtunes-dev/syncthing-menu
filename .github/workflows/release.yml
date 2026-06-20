@@ -1,0 +1,29 @@
+name: Release
+
+# STUB: manually triggered for now. Signing and notarization are not yet wired
+# up — they require a Developer ID certificate and notarization credentials
+# stored as repository secrets. See Scripts/sign-and-notarize.sh.
+on:
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: Build, sign, notarize, package
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: xcodebuild -version
+
+      # TODO: import Developer ID cert from secrets into a temporary keychain
+      # TODO: xcodebuild archive -> export Release .app
+      # TODO: ./Scripts/sign-and-notarize.sh
+      # TODO: ./Scripts/make-dmg.sh
+      # TODO: generate / update Sparkle appcast.xml
+      # TODO: attach the .dmg to a GitHub Release
+      - name: Not yet implemented
+        run: |
+          echo "Release pipeline is a stub; see Scripts/sign-and-notarize.sh." >&2
+          exit 1

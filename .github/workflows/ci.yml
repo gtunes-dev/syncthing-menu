@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+# Unsigned build for fast PR validation. No secrets required — signing and
+# notarization happen only in the release workflow.
+jobs:
+  build:
+    name: Build (unsigned)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: xcodebuild -version
+
+      - name: Build
+        run: |
+          xcodebuild \
+            -project SyncthingMenu.xcodeproj \
+            -target SyncthingMenu \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            build
