@@ -85,21 +85,21 @@ final class StatusItemController: NSObject {
 
         let webUI = menu.addItem(withTitle: "Open Web UI…",
                                  action: #selector(openWebUI),
-                                 keyEquivalent: "o")
+                                 keyEquivalent: "")
         webUI.target = self
         webUI.isEnabled = false   // enabled once the daemon is running (see update)
         webUIItem = webUI
 
         let settingsItem = menu.addItem(withTitle: "Settings…",
                                         action: #selector(openSettings),
-                                        keyEquivalent: ",")
+                                        keyEquivalent: "")
         settingsItem.target = self
 
         menu.addItem(.separator())
 
-        let quit = menu.addItem(withTitle: "Quit Syncthing Menu",
+        let quit = menu.addItem(withTitle: "Quit",
                                 action: #selector(quit),
-                                keyEquivalent: "q")
+                                keyEquivalent: "")
         quit.target = self
     }
 

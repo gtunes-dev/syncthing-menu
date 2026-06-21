@@ -36,11 +36,18 @@ final class SettingsWindowController {
             newWindow.title = "Syncthing Menu Settings"
             newWindow.styleMask = [.titled, .closable]   // fixed-size settings panel
             newWindow.isReleasedWhenClosed = false
-            newWindow.center()
+            // Force a layout pass and pin the window to the SwiftUI content's
+            // resolved size, so the later center() positions a correctly-sized
+            // window rather than an intermediate one.
+            newWindow.layoutIfNeeded()
+            newWindow.setContentSize(hosting.view.fittingSize)
             window = newWindow
         }
 
+        // Center on the active screen each time it's opened. NSWindow.center() is the
+        // HIG placement: horizontally centered, biased slightly above vertical center.
         NSApp.activate(ignoringOtherApps: true)
+        window?.center()
         window?.makeKeyAndOrderFront(nil)
     }
 }
