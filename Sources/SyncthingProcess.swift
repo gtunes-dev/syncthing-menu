@@ -30,7 +30,9 @@ final class SyncthingProcess {
 
     private let binaryURL: URL
     private let homeURL: URL
-    private var process: Process?
+    private var pid: pid_t?
+    private var stdoutHandle: FileHandle?
+    private var exitSource: DispatchSourceProcess?
     private var intentionalStop = false
 
     /// Where we persist *our* chosen GUI port (not in Syncthing's config).
@@ -49,7 +51,7 @@ final class SyncthingProcess {
 
     /// Launch the daemon. No-op if already running.
     func start() {
-        guard process == nil else { return }
+        guard pid == nil else { return }
         state = .starting
         intentionalStop = false
 
@@ -68,13 +70,32 @@ final class SyncthingProcess {
         }
     }
 
-    /// Stop the daemon cleanly (SIGTERM) and wait for it to exit.
+    /// Stop the daemon cleanly (SIGTERM) and wait for it to exit (SIGKILL after 5s).
     func stop() {
-        guard let proc = process else { return }
+        guard let pid = self.pid else { return }
         intentionalStop = true
-        proc.terminate()
-        proc.waitUntilExit()
-        process = nil
+        // We reap synchronously below, so cancel the async exit watcher first.
+        exitSource?.cancel()
+        exitSource = nil
+
+        kill(pid, SIGTERM)
+        let deadline = Date().addingTimeInterval(5)
+        var status: Int32 = 0
+        while true {
+            let r = waitpid(pid, &status, WNOHANG)
+            if r == pid { break }                       // reaped
+            if r == -1 && errno != EINTR { break }      // already gone / error
+            if Date() >= deadline {
+                kill(pid, SIGKILL)
+                waitpid(pid, &status, 0)
+                break
+            }
+            usleep(50_000)
+        }
+
+        self.pid = nil
+        stdoutHandle?.readabilityHandler = nil
+        stdoutHandle = nil
         state = .stopped
     }
 
@@ -122,46 +143,114 @@ final class SyncthingProcess {
     // MARK: - Launch
 
     private func launchServe(plan: LaunchPlan) {
-        let proc = Process()
-        proc.executableURL = binaryURL
-        var args = ["serve", "--home", homeURL.path, "--no-browser"]
+        var args = [binaryURL.path, "serve", "--home", homeURL.path, "--no-browser"]
         if let override = plan.guiAddressOverride {
             args += ["--gui-address", override]
         }
-        proc.arguments = args
 
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            NSLog("[syncthing] \(text.trimmingCharacters(in: .newlines))")
+        // Pipe the daemon's stdout+stderr back for logging.
+        var fds: [Int32] = [-1, -1]
+        guard pipe(&fds) == 0 else {
+            state = .failed("Couldn't create a pipe for Syncthing output")
+            return
+        }
+        let readFD = fds[0], writeFD = fds[1]
+
+        var fileActions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&fileActions)
+        posix_spawn_file_actions_adddup2(&fileActions, writeFD, STDOUT_FILENO)
+        posix_spawn_file_actions_adddup2(&fileActions, writeFD, STDERR_FILENO)
+        posix_spawn_file_actions_addclose(&fileActions, readFD)
+        posix_spawn_file_actions_addclose(&fileActions, writeFD)
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+
+        // Disclaim TCC responsibility so the daemon is its OWN responsible process —
+        // required for a Full Disk Access grant on the (out-of-bundle) Syncthing binary
+        // to take effect. Without it the daemon inherits our app's TCC context, which —
+        // being out-of-bundle — does not carry the grant. Verified in the FDA spike.
+        var attr: posix_spawnattr_t?
+        posix_spawnattr_init(&attr)
+        if let disclaim = Self.disclaimFn {
+            _ = disclaim(&attr, 1)
+        } else {
+            NSLog("[syncthing] warning: disclaim API unavailable; FDA grants on the daemon may not apply")
+        }
+        defer { posix_spawnattr_destroy(&attr) }
+
+        var argv: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) }
+        argv.append(nil)
+        defer { argv.forEach { free($0) } }
+
+        var envp: [UnsafeMutablePointer<CChar>?] =
+            ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") }
+        envp.append(nil)
+        defer { envp.forEach { free($0) } }
+
+        var newPid: pid_t = 0
+        let rc = posix_spawn(&newPid, binaryURL.path, &fileActions, &attr, argv, envp)
+        close(writeFD)   // the parent never writes
+
+        guard rc == 0 else {
+            close(readFD)
+            state = .failed("Couldn't launch Syncthing: \(String(cString: strerror(rc)))")
+            return
         }
 
-        proc.terminationHandler = { [weak self] finished in
-            DispatchQueue.main.async {
-                pipe.fileHandleForReading.readabilityHandler = nil
-                guard let self else { return }
-                self.process = nil
-                if self.intentionalStop {
-                    self.state = .stopped
-                } else {
-                    // TODO (B4): restart with backoff on unexpected exit.
-                    self.state = .failed("Syncthing exited (code \(finished.terminationStatus))")
-                }
+        // Log the daemon's output.
+        let handle = FileHandle(fileDescriptor: readFD, closeOnDealloc: true)
+        handle.readabilityHandler = { h in
+            let data = h.availableData
+            guard !data.isEmpty else { h.readabilityHandler = nil; return }   // EOF
+            if let text = String(data: data, encoding: .utf8) {
+                NSLog("[syncthing] \(text.trimmingCharacters(in: .newlines))")
             }
         }
+        stdoutHandle = handle
 
-        do {
-            try proc.run()
-            process = proc
-            apiKey = plan.apiKey
-            state = .running(guiURL: plan.guiURL)
-            NSLog("Syncthing daemon started at \(plan.guiURL) (home: \(homeURL.path))")
-        } catch {
-            state = .failed("Couldn't launch Syncthing: \(error.localizedDescription)")
+        // Detect unexpected exits. An intentional stop() cancels this and reaps itself.
+        let source = DispatchSource.makeProcessSource(identifier: newPid, eventMask: .exit,
+                                                      queue: .main)
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.exitSource?.cancel()
+            self.exitSource = nil
+            var status: Int32 = 0
+            waitpid(newPid, &status, WNOHANG)
+            self.pid = nil
+            self.stdoutHandle?.readabilityHandler = nil
+            self.stdoutHandle = nil
+            if !self.intentionalStop {
+                // TODO (B4): restart with backoff on unexpected exit.
+                self.state = .failed("Syncthing exited (\(Self.describe(status)))")
+            }
         }
+        source.resume()
+        exitSource = source
+        pid = newPid
+
+        apiKey = plan.apiKey
+        state = .running(guiURL: plan.guiURL)
+        NSLog("Syncthing daemon started at \(plan.guiURL) (home: \(homeURL.path))")
+    }
+
+    // MARK: - Disclaimed spawn (TCC responsible process)
+
+    private typealias DisclaimFn =
+        @convention(c) (UnsafeMutablePointer<posix_spawnattr_t?>, Int32) -> Int32
+
+    /// `responsibility_spawnattrs_setdisclaim` (private libsystem API) makes a spawned
+    /// child its OWN TCC responsible process — so a Full Disk Access grant on the
+    /// out-of-bundle Syncthing binary actually applies. Resolved at runtime via dlsym;
+    /// nil if unavailable (then we spawn without it).
+    private static let disclaimFn: DisclaimFn? = {
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2)!,   // RTLD_DEFAULT
+                              "responsibility_spawnattrs_setdisclaim") else { return nil }
+        return unsafeBitCast(sym, to: DisclaimFn.self)
+    }()
+
+    /// Human-readable description of a `waitpid` status.
+    private static func describe(_ status: Int32) -> String {
+        (status & 0x7f) == 0 ? "code \((status >> 8) & 0xff)" : "signal \(status & 0x7f)"
     }
 
     // MARK: - GUI port persistence (our side, never Syncthing's config)
