@@ -12,13 +12,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let syncthingProcess = SyncthingProcess()
     private var cancellables = Set<AnyCancellable>()
 
-    // Update sources. Mocked for now; the real Syncthing (REST) and app (Sparkle)
-    // sources will replace these and conform to the same `UpdateSource` surface.
-    private lazy var appUpdateSource: UpdateSource = {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        return MockUpdateSource(name: "App", currentVersion: version, checkResult: .upToDate)
-    }()
-
+    // Update sources, each conforming to the same `UpdateSource` surface: the app
+    // updates via Sparkle, Syncthing via its REST API.
+    private let appUpdateSource: UpdateSource = SparkleUpdateSource()
     private let syncthingUpdateSource = SyncthingUpdateSource(settings: .shared)
 
     func applicationDidFinishLaunching(_ notification: Notification) {

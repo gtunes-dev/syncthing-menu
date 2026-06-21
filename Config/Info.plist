@@ -28,5 +28,17 @@
 	<string>Copyright © 2026 Greg Friedman. All rights reserved.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<!-- Sparkle (app self-update). The feed lives on GitHub Pages in production;
+	     SparkleUpdateSource overrides it with a local appcast for testing. -->
+	<key>SUFeedURL</key>
+	<string>https://gtunes-dev.github.io/syncthing-menu/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>Z03dL2Vf4gVMfWlAifARn9KxUrNLP7gMQW4RTggB9+A=</string>
+	<!-- Sensible defaults; the user toggles these through our Settings UI. Setting
+	     SUEnableAutomaticChecks here suppresses Sparkle's own first-run prompt. -->
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>
