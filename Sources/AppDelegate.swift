@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 
 /// Application lifecycle owner. Holds the menu-bar controller, the settings
 /// window, and the update sources. Will later own the Syncthing subprocess
@@ -9,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let loginItem = LoginItemController()
     private let releaseUpdater = ReleaseUpdater()
     private let syncthingProcess = SyncthingProcess()
+    private var cancellables = Set<AnyCancellable>()
 
     // Update sources. Mocked for now; the real Syncthing (REST) and app (Sparkle)
     // sources will replace these and conform to the same `UpdateSource` surface.
@@ -47,6 +49,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // Surface "update available" on the menu-bar icon (Syncthing or app — the
+        // icon does not distinguish between them).
+        Publishers.CombineLatest(syncthingUpdateSource.$state, appUpdateSource.$state)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] syncState, appState in
+                let available = Self.isUpdateAvailable(syncState) || Self.isUpdateAvailable(appState)
+                self?.statusItemController?.setUpdateAvailable(available)
+            }
+            .store(in: &cancellables)
+
         // Bootstrap the binary (download + verify if needed), then launch the
         // managed daemon.
         Task {
@@ -62,5 +74,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         syncthingProcess.stop()
+    }
+
+    private static func isUpdateAvailable(_ state: UpdateState) -> Bool {
+        if case .available = state { return true }
+        return false
     }
 }
