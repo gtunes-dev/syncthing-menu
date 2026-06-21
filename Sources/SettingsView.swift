@@ -20,8 +20,8 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 18) {
             // Primary: the Syncthing daemon.
             SettingsCard(title: "Syncthing",
-                         systemImage: "arrow.triangle.2.circlepath",
-                         version: syncthingSource.currentVersion ?? "Not installed") {
+                         version: syncthingSource.currentVersion ?? "Not installed",
+                         icon: { Image("SyncthingLogo").resizable().scaledToFit() }) {
                 UpdateStatusRow(source: syncthingSource)
 
                 Divider()
@@ -37,9 +37,9 @@ struct SettingsView: View {
             }
 
             // Secondary: this menu-bar app.
-            SettingsCard(title: "Application",
-                         systemImage: "menubar.rectangle",
-                         version: appVersion) {
+            SettingsCard(title: "Syncthing Menu",
+                         version: appVersion,
+                         icon: { Image("AppMark").resizable().scaledToFit() }) {
                 UpdateStatusRow(source: appSource)
 
                 Divider()
@@ -57,12 +57,14 @@ struct SettingsView: View {
     }
 }
 
-/// A titled card: SF Symbol + name on the left, current version right-aligned in
-/// the header, and arbitrary content stacked below.
-private struct SettingsCard<Content: View>: View {
+/// A titled card: icon + name on the left, current version right-aligned in the
+/// header, and arbitrary content stacked below. The icon is caller-supplied so each
+/// card can use the appropriate mark (the full-color Syncthing logo, or our
+/// monochrome menu-bar mark) sized to a consistent 18×18.
+private struct SettingsCard<Icon: View, Content: View>: View {
     let title: String
-    let systemImage: String
     let version: String
+    @ViewBuilder var icon: () -> Icon
     @ViewBuilder var content: () -> Content
 
     var body: some View {
@@ -74,8 +76,8 @@ private struct SettingsCard<Content: View>: View {
             .padding(8)
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: systemImage)
-                    .foregroundStyle(.secondary)
+                icon()
+                    .frame(width: 18, height: 18)
                 Text(title)
                     .font(.headline)
                 Spacer()
