@@ -45,6 +45,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // After an upgrade is applied, restart the daemon so its supervisor re-roots on
+        // the canonical `syncthing` binary (fresh disclaim) instead of the renamed
+        // `syncthing.old` that the running monitor would otherwise stay backed by.
+        syncthingUpdateSource.onUpgradeApplied = { [weak self] in
+            self?.syncthingProcess.restart()
+        }
+
         // Surface "update available" on the menu-bar icon (Syncthing or app — the
         // icon does not distinguish between them).
         Publishers.CombineLatest(syncthingUpdateSource.$state, appUpdateSource.$state)

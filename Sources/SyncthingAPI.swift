@@ -43,6 +43,14 @@ struct SyncthingAPI {
         _ = try await send("/rest/system/upgrade", method: "POST")
     }
 
+    /// `POST /rest/system/shutdown` → ask the daemon to exit cleanly and not restart.
+    /// Served by the worker (which owns the API); its clean exit takes the monitor down
+    /// too. Our primary graceful stop; the process supervisor falls back to a signal if
+    /// the daemon doesn't exit in time.
+    func shutdown() async throws {
+        _ = try await send("/rest/system/shutdown", method: "POST")
+    }
+
     // MARK: Config
 
     /// `PATCH /rest/config/options` → set the daemon's auto-upgrade interval. We set

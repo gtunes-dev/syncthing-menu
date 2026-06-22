@@ -23,6 +23,11 @@ final class SyncthingUpdateSource: UpdateSource {
     private var pollTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
 
+    /// Called after an upgrade has been applied and the daemon has restarted onto the
+    /// new version. The app uses this to cleanly restart the daemon so its supervisor
+    /// re-roots on `syncthing` (fresh disclaim) instead of the renamed `syncthing.old`.
+    var onUpgradeApplied: (() -> Void)?
+
     /// How often to poll for updates while auto-check is enabled.
     private let pollInterval: TimeInterval = 6 * 3600
 
@@ -105,11 +110,19 @@ final class SyncthingUpdateSource: UpdateSource {
                 self.state = .unknown
                 return
             }
-            // The daemon downloads, replaces its binary, and restarts (its monitor
-            // keeps our process alive). Give it a moment, then refresh the display.
-            // autoInstall:false so a still-pending update doesn't trigger a retry loop.
+            // The daemon self-upgrades — it renames the running binary to `syncthing.old`,
+            // writes the new `syncthing`, and restarts its worker (its monitor keeps our
+            // process alive). Give it a moment to come up on the new version, then ask the
+            // app to restart the daemon cleanly so its supervisor re-roots on the canonical
+            // `syncthing` (fresh disclaim) instead of staying backed by `syncthing.old`.
+            // The restart's reconnect refreshes our state; if no handler is wired, fall back
+            // to a plain re-check (autoInstall:false to avoid a retry loop).
             try? await Task.sleep(nanoseconds: 5_000_000_000)
-            self.refresh(autoInstall: false)
+            if let onUpgradeApplied = self.onUpgradeApplied {
+                onUpgradeApplied()
+            } else {
+                self.refresh(autoInstall: false)
+            }
         }
     }
 

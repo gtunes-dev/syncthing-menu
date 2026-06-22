@@ -33,7 +33,14 @@ final class SyncthingProcess {
     private var pid: pid_t?
     private var stdoutHandle: FileHandle?
     private var exitSource: DispatchSourceProcess?
-    private var intentionalStop = false
+    private var guiURL: String?     // the running worker's REST base, for graceful shutdown
+
+    /// Latched `true` by `stop()` — the supervisor is terminating and must never
+    /// (re)launch the daemon again. This is the single lifecycle guard: `start()`,
+    /// `restart()`, and the launch path all check it, so a quit landing in the middle of
+    /// an in-flight start/restart can't spawn an orphaned daemon. `restart()` stops the
+    /// daemon via `beginStop()` (not `stop()`), so a restart never sets this flag.
+    private var isTerminating = false
 
     /// Where we persist *our* chosen GUI port (not in Syncthing's config).
     private static let guiPortDefaultsKey = "syncthing.managedGUIPort"
@@ -51,9 +58,8 @@ final class SyncthingProcess {
 
     /// Launch the daemon. No-op if already running.
     func start() {
-        guard pid == nil else { return }
+        guard !isTerminating, pid == nil else { return }
         state = .starting
-        intentionalStop = false
 
         // Generate (first run) can block briefly, so do prep off-main; the actual
         // launch returns to main to keep process state consistent.
@@ -64,38 +70,104 @@ final class SyncthingProcess {
                 DispatchQueue.main.async { self.launchServe(plan: plan) }
             } catch {
                 DispatchQueue.main.async {
+                    guard !self.isTerminating else { return }
                     self.state = .failed("Setup failed: \(error.localizedDescription)")
                 }
             }
         }
     }
 
-    /// Stop the daemon cleanly (SIGTERM) and wait for it to exit (SIGKILL after 5s).
+    /// Stop the daemon and wait for it to exit. Graceful ladder: ask Syncthing to shut
+    /// down via REST (the worker owns the API; its clean exit takes the monitor with it),
+    /// then SIGTERM, then SIGKILL. Synchronous — safe to call from
+    /// applicationWillTerminate, where we must block until the daemon is actually down.
     func stop() {
+        isTerminating = true            // latch: never relaunch after a terminal stop (quit)
         guard let pid = self.pid else { return }
-        intentionalStop = true
-        // We reap synchronously below, so cancel the async exit watcher first.
+        beginStop()
+        escalateAndReap(pid)
+        finishStop()
+    }
+
+    /// Stop and relaunch without blocking the caller. Used after a self-upgrade so the
+    /// monitor re-roots on the canonical `syncthing` (with a fresh disclaim) instead of
+    /// staying backed by the renamed `syncthing.old`. Equivalent to a fresh launch.
+    func restart() {
+        guard !isTerminating else { return }
+        guard let pid = self.pid else { start(); return }
+        beginStop()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.escalateAndReap(pid)
+            DispatchQueue.main.async {
+                guard let self, !self.isTerminating else { return }   // superseded by a quit
+                self.finishStop()
+                self.start()
+            }
+        }
+    }
+
+    /// Stop watching for an unexpected exit (so the deliberate reap below isn't mistaken
+    /// for a crash) and fire the graceful REST shutdown (fire-and-forget — actual exit is
+    /// detected by `escalateAndReap`, so the HTTP response is irrelevant).
+    private func beginStop() {
         exitSource?.cancel()
         exitSource = nil
+        if let urlString = guiURL, let url = URL(string: urlString), let key = apiKey {
+            let api = SyncthingAPI(baseURL: url, apiKey: key)
+            Task {
+                do {
+                    try await api.shutdown()
+                    NSLog("[syncthing] REST shutdown request accepted")
+                } catch {
+                    NSLog("[syncthing] REST shutdown request failed: \(error.localizedDescription)")
+                }
+            }
+        } else {
+            NSLog("[syncthing] no REST endpoint available — stopping via signal")
+        }
+    }
 
+    /// Block until the daemon exits, escalating REST → SIGTERM → SIGKILL. Logs which
+    /// stage actually stopped it (and how long it took).
+    private func escalateAndReap(_ pid: pid_t) {
+        let start = Date()
+        func elapsed() -> String { String(format: "%.1fs", Date().timeIntervalSince(start)) }
+
+        if waitForExit(pid, 3) {
+            NSLog("[syncthing] stopped via REST shutdown (\(elapsed()))")
+            return
+        }
+        NSLog("[syncthing] REST shutdown didn't complete in 3s — falling back to SIGTERM")
         kill(pid, SIGTERM)
-        let deadline = Date().addingTimeInterval(5)
+        if waitForExit(pid, 3) {
+            NSLog("[syncthing] stopped via SIGTERM (\(elapsed()))")
+            return
+        }
+        NSLog("[syncthing] SIGTERM didn't complete in 3s — sending SIGKILL")
+        kill(pid, SIGKILL)
+        _ = waitForExit(pid, 2)
+        NSLog("[syncthing] stopped via SIGKILL (\(elapsed()))")
+    }
+
+    /// Poll `waitpid` until the process is reaped or `seconds` elapse; returns whether reaped.
+    private func waitForExit(_ pid: pid_t, _ seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
         var status: Int32 = 0
         while true {
             let r = waitpid(pid, &status, WNOHANG)
-            if r == pid { break }                       // reaped
-            if r == -1 && errno != EINTR { break }      // already gone / error
-            if Date() >= deadline {
-                kill(pid, SIGKILL)
-                waitpid(pid, &status, 0)
-                break
-            }
+            if r == pid { return true }                  // reaped
+            if r == -1 && errno != EINTR { return true } // already gone / error
+            if Date() >= deadline { return false }
             usleep(50_000)
         }
+    }
 
-        self.pid = nil
+    /// Clear process state after exit. Must run on the main thread (mutates `state`).
+    private func finishStop() {
+        pid = nil
         stdoutHandle?.readabilityHandler = nil
         stdoutHandle = nil
+        guiURL = nil
         state = .stopped
     }
 
@@ -143,6 +215,8 @@ final class SyncthingProcess {
     // MARK: - Launch
 
     private func launchServe(plan: LaunchPlan) {
+        // A terminal stop may have landed while we prepared off-main; never spawn after that.
+        guard !isTerminating else { return }
         var args = [binaryURL.path, "serve", "--home", homeURL.path, "--no-browser"]
         if let override = plan.guiAddressOverride {
             args += ["--gui-address", override]
@@ -219,7 +293,7 @@ final class SyncthingProcess {
             self.pid = nil
             self.stdoutHandle?.readabilityHandler = nil
             self.stdoutHandle = nil
-            if !self.intentionalStop {
+            if !self.isTerminating {
                 // TODO (B4): restart with backoff on unexpected exit.
                 self.state = .failed("Syncthing exited (\(Self.describe(status)))")
             }
@@ -229,6 +303,7 @@ final class SyncthingProcess {
         pid = newPid
 
         apiKey = plan.apiKey
+        guiURL = plan.guiURL
         state = .running(guiURL: plan.guiURL)
         NSLog("Syncthing daemon started at \(plan.guiURL) (home: \(homeURL.path))")
     }
