@@ -28,12 +28,16 @@ struct SettingsView: View {
 
                 Toggle("Automatically check for updates",
                        isOn: $settings.syncthingAutoCheckEnabled)
-                Toggle("Install updates automatically",
+                Toggle("Install minor updates automatically",
                        isOn: $settings.syncthingAutoInstallEnabled)
                     .disabled(!settings.syncthingAutoCheckEnabled)   // slaved to auto-check
-                Text("Major Syncthing updates always ask before installing.")
+                Text("Major Syncthing updates require user approval")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+
+                Divider()
+
+                FullDiskAccessSection(binaryURL: ReleaseUpdater.installedBinaryURL)
             }
 
             // Secondary: this menu-bar app.
@@ -44,12 +48,12 @@ struct SettingsView: View {
 
                 Divider()
 
+                Toggle("Automatically check for updates",
+                       isOn: $settings.appAutoCheckEnabled)
                 Toggle("Open at login", isOn: Binding(
                     get: { loginItem.isEnabled },
                     set: { loginItem.setEnabled($0) }
                 ))
-                Toggle("Automatically check for updates",
-                       isOn: $settings.appAutoCheckEnabled)
             }
         }
         .padding(20)
@@ -68,13 +72,9 @@ private struct SettingsCard<Icon: View, Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 12) {
-                content()
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(8)
-        } label: {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header lives inside the card (common region) with a divider to its
+            // content, so the title and its controls read as one group.
             HStack(spacing: 8) {
                 icon()
                     .frame(width: 18, height: 18)
@@ -85,7 +85,25 @@ private struct SettingsCard<Icon: View, Content: View>: View {
                     .font(.body.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
         }
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5)
+        )
     }
 }
 
@@ -138,9 +156,9 @@ private struct UpdateStatusRow: View {
         case .installing:
             EmptyView()
         case .checking:
-            Button("Check Now") {}.disabled(true)
+            Button("Check Now") {}.disabled(true).buttonStyle(.borderedProminent)
         default:
-            Button("Check Now") { source.checkNow() }
+            Button("Check Now") { source.checkNow() }.buttonStyle(.borderedProminent)
         }
     }
 }

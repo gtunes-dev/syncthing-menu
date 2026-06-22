@@ -36,6 +36,7 @@ final class SettingsWindowController {
             newWindow.title = "Syncthing Menu Settings"
             newWindow.styleMask = [.titled, .closable]   // fixed-size settings panel
             newWindow.isReleasedWhenClosed = false
+            newWindow.preventsApplicationTerminationWhenModal = false
             // Force a layout pass and pin the window to the SwiftUI content's
             // resolved size, so the later center() positions a correctly-sized
             // window rather than an intermediate one.
