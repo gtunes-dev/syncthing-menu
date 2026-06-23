@@ -8,12 +8,14 @@ on:
       - 'LICENSE'
       - '.gitignore'
       - 'design/**'
+      - 'docs/**'
   pull_request:
     paths-ignore:
       - '**/*.md'
       - 'LICENSE'
       - '.gitignore'
       - 'design/**'
+      - 'docs/**'
 
 # Unsigned build for fast PR validation. No secrets required — signing and
 # notarization happen only in the release workflow.
