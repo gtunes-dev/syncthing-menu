@@ -69,6 +69,19 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Releasing $VERSION (build $BUILD) from tag $TAG"
 
+      - name: Extract release notes
+        id: notes
+        run: |
+          NOTES="$RUNNER_TEMP/notes.md"
+          awk -v ver="${{ steps.ver.outputs.version }}" '
+            index($0, "## [" ver "]") == 1 { grab = 1; next }
+            grab && index($0, "## [") == 1 { exit }
+            grab { print }
+          ' CHANGELOG.md | sed '/./,$!d' > "$NOTES"
+          [ -s "$NOTES" ] || { echo "No CHANGELOG section for ${{ steps.ver.outputs.version }}"; exit 1; }
+          echo "file=$NOTES" >> "$GITHUB_OUTPUT"
+          echo "----- release notes -----"; cat "$NOTES"
+
       - name: Import Developer ID certificate
         env:
           P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
@@ -116,7 +129,7 @@ jobs:
           gh release create "${{ steps.ver.outputs.tag }}" \
             "${{ steps.build.outputs.zip }}" \
             --title "${{ steps.ver.outputs.version }}" \
-            --generate-notes
+            --notes-file "${{ steps.notes.outputs.file }}"
 
       - name: Publish Sparkle appcast (gh-pages)
         env:
@@ -132,6 +145,9 @@ jobs:
             mkdir site && git -C site init -q && git -C site checkout -q -b gh-pages
           fi
           cp "${{ steps.build.outputs.zip }}" site/
+          # A same-named .md beside the archive becomes the item's Sparkle release
+          # notes ("what's new" in the update dialog).
+          cp "${{ steps.notes.outputs.file }}" "site/SyncthingMenu-${{ steps.ver.outputs.version }}.md"
           # Regenerate the EdDSA-signed appcast. Enclosure URLs use the uniform
           # Pages prefix; the private key is piped in (never written to disk).
           printf '%s' "$SPARKLE_ED_PRIVATE_KEY" | \

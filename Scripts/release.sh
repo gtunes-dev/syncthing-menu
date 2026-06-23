@@ -2,10 +2,14 @@
 #
 # release.sh — cut a release.
 #
-# Validates the repo state, bumps MARKETING_VERSION to match, creates an
-# annotated tag v<version>, and pushes main + the tag. Pushing the tag triggers
-# .github/workflows/release.yml (build → Developer ID sign → notarize → staple →
-# GitHub Release + Sparkle appcast on gh-pages).
+# Validates the repo state, promotes the CHANGELOG's [Unreleased] notes to the new
+# version, bumps MARKETING_VERSION to match, creates an annotated tag v<version>,
+# and pushes main + the tag. Pushing the tag triggers .github/workflows/release.yml
+# (build → Developer ID sign → notarize → staple → GitHub Release + Sparkle appcast
+# on gh-pages), which reads the promoted CHANGELOG section for both the GitHub
+# Release body and the Sparkle "what's new" notes.
+#
+# Requires release notes under "## [Unreleased]" in CHANGELOG.md.
 #
 # Usage:  Scripts/release.sh <version>        e.g.  Scripts/release.sh 0.1.0
 #         (version is semver X.Y.Z, no leading "v")
@@ -14,6 +18,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 PROJ="SyncthingMenu.xcodeproj/project.pbxproj"
+CHANGELOG="CHANGELOG.md"
 REMOTE_WEB="https://github.com/gtunes-dev/syncthing-menu"
 
 die() { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
@@ -53,15 +58,27 @@ if [ -n "$LATEST" ]; then
     version_gt "$VERSION" "${LATEST#v}" || die "version $VERSION must be greater than the latest release $LATEST"
 fi
 
-# ── Bump version (commit only if it actually changes) ─────────────────────────
+# ── CHANGELOG: require notes under [Unreleased], promote them to this version ─
+[ -f "$CHANGELOG" ] || die "$CHANGELOG not found"
+grep -qF "## [Unreleased]" "$CHANGELOG" || die "$CHANGELOG has no '## [Unreleased]' section"
+grep -qF "## [$VERSION]" "$CHANGELOG" && die "$CHANGELOG already has a section for $VERSION"
+
+UNRELEASED="$(awk '/^## \[Unreleased\]/{f=1; next} f && /^## \[/{exit} f{print}' "$CHANGELOG")"
+printf '%s\n' "$UNRELEASED" | grep -q '[^[:space:]]' \
+    || die "nothing under '## [Unreleased]' in $CHANGELOG — add release notes before cutting $TAG"
+
+log "Promoting CHANGELOG [Unreleased] → [$VERSION]…"
+awk -v ver="$VERSION" -v date="$(date +%F)" '
+    /^## \[Unreleased\]/ && !done { print; print ""; print "## [" ver "] - " date; done = 1; next }
+    { print }
+' "$CHANGELOG" > "$CHANGELOG.tmp" && mv "$CHANGELOG.tmp" "$CHANGELOG"
+
+# ── Bump version ──────────────────────────────────────────────────────────────
 log "Setting MARKETING_VERSION = $VERSION…"
 sed -i '' -E "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = $VERSION;/g" "$PROJ"
-git add "$PROJ"
-if git diff --cached --quiet; then
-    log "MARKETING_VERSION already $VERSION — no bump commit needed."
-else
-    git commit -q -m "Release $TAG"
-fi
+
+git add "$PROJ" "$CHANGELOG"
+git commit -q -m "Release $TAG"
 
 # ── Tag + push (this triggers the Release workflow) ───────────────────────────
 log "Creating annotated tag $TAG and pushing…"
