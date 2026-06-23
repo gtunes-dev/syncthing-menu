@@ -3,20 +3,35 @@ name: CI
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - 'design/**'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - 'design/**'
 
 # Unsigned build for fast PR validation. No secrets required — signing and
 # notarization happen only in the release workflow.
 jobs:
   build:
     name: Build (unsigned)
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Show toolchain
-        run: xcodebuild -version
+      - name: Select latest stable Xcode
+        # Match the release workflow: the project is in Xcode 16+ format
+        # (objectVersion 77), so avoid an older default Xcode.
+        run: |
+          XC="$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)"
+          if [ -n "$XC" ]; then sudo xcode-select -s "$XC"; fi
+          xcodebuild -version
 
       - name: Build
         run: |
