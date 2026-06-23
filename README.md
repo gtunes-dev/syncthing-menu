@@ -6,9 +6,24 @@ It runs Syncthing quietly in the background and gives it a simple menu-bar
 presence — status at a glance, one click to the web UI, and a small Settings
 window for updates. No Dock icon, no heavyweight UI.
 
-> **Status:** pre-release. The app is feature-complete for a first release and
-> in active testing; signed/notarized builds and the public Sparkle update feed
-> are being finalized.
+[![Latest release](https://img.shields.io/github/v/release/gtunes-dev/syncthing-menu?label=download)](https://github.com/gtunes-dev/syncthing-menu/releases/latest)
+
+## Getting Started
+
+1. Download the latest **`SyncthingMenu-<version>.zip`** from the
+   [**Releases** page](https://github.com/gtunes-dev/syncthing-menu/releases/latest).
+2. Unzip it (double-click in Finder) and drag **Syncthing Menu.app** into your
+   **Applications** folder.
+3. Launch it. The build is signed and notarized, so it opens without Gatekeeper
+   warnings. The icon appears in the menu bar — there's no Dock icon.
+
+On first launch it downloads the official Syncthing daemon and starts it in the
+background. Allow the **Local Network** prompt so Syncthing can reach your other
+devices; if you sync folders in protected locations (Desktop, Documents, …) you
+may also be asked for **Full Disk Access** (see [Permissions](#permissions)).
+From then on it keeps both Syncthing and itself up to date automatically.
+
+Requires macOS 13 or later.
 
 ## Why another wrapper?
 
