@@ -34,9 +34,22 @@
       "command": "NOTARY_PROFILE=syncthing-menu \"${workspaceFolder}/Scripts/sign-and-notarize.sh\"",
       "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
       "problemMatcher": []
+    },
+    {
+      "label": "Cut Release",
+      "detail": "Validate, bump MARKETING_VERSION, create the annotated tag v<version>, and push — triggers the Release workflow on GitHub.",
+      "type": "shell",
+      "command": "\"${workspaceFolder}/Scripts/release.sh\" \"${input:releaseVersion}\"",
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
     }
   ],
   "inputs": [
+    {
+      "id": "releaseVersion",
+      "type": "promptString",
+      "description": "Release version (semver X.Y.Z, no leading v), e.g. 0.1.0"
+    },
     {
       "id": "p8Path",
       "type": "promptString",
