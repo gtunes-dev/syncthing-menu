@@ -41,12 +41,20 @@ env:
 
 jobs:
   release:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0   # full history → monotonic build number via rev-list
+
+      - name: Select latest stable Xcode
+        # The project is in Xcode 16+ format (objectVersion 77); the runner's
+        # default Xcode can be older, so pick the newest non-beta Xcode present.
+        run: |
+          XC="$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)"
+          if [ -n "$XC" ]; then sudo xcode-select -s "$XC"; fi
+          xcodebuild -version
 
       - name: Resolve version
         id: ver
