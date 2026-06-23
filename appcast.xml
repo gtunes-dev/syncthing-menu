@@ -1,0 +1,14 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>SyncthingMenu</title>
+        <item>
+            <title>0.1.0</title>
+            <pubDate>Tue, 23 Jun 2026 14:33:26 +0000</pubDate>
+            <sparkle:version>20</sparkle:version>
+            <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://gtunes-dev.github.io/syncthing-menu/SyncthingMenu-0.1.0.zip" length="4280461" type="application/octet-stream" sparkle:edSignature="3Iv8TtiqkdsVYYGYcfdJjaa6YKxA2jTFZtTeVYGYMtog5RRgFTds1GQ5mJK9vtaMZjUuWQErSIYApK8nRvPYAQ=="/>
+        </item>
+    </channel>
+</rss>
