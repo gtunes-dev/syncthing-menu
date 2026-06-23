@@ -6,6 +6,10 @@ It runs Syncthing quietly in the background and gives it a simple menu-bar
 presence — status at a glance, one click to the web UI, and a small Settings
 window for updates. No Dock icon, no heavyweight UI.
 
+<p align="center">
+  <img src="docs/menu.png" alt="The Syncthing Menu menu-bar dropdown" width="240">
+</p>
+
 [![Latest release](https://img.shields.io/github/v/release/gtunes-dev/syncthing-menu?label=download)](https://github.com/gtunes-dev/syncthing-menu/releases/latest)
 
 ## Getting Started
@@ -100,6 +104,10 @@ Two independent update channels, each surfaced in Settings:
   back up cleanly.
 - **Syncthing Menu (the app):** delivered through Sparkle; auto-check is on by
   default.
+
+<p align="center">
+  <img src="docs/settings.png" alt="The Syncthing Menu Settings window" width="440">
+</p>
 
 ## Building
 
