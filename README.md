@@ -2,50 +2,89 @@
 
 A frugal, native macOS menu-bar app for [Syncthing](https://syncthing.net).
 
-It runs the Syncthing daemon as a background process and gives it a simple
-menu-bar presence (status, open web UI, quit) — no Dock icon, no heavyweight UI.
+It runs Syncthing quietly in the background and gives it a simple menu-bar
+presence — status at a glance, one click to the web UI, and a small Settings
+window for updates. No Dock icon, no heavyweight UI.
 
-> **Status:** early scaffold. The menu-bar shell builds and runs; the Syncthing
-> supervisor and updater are stubs. Not yet signed or notarized.
+> **Status:** pre-release. The app is feature-complete for a first release and
+> in active testing; signed/notarized builds and the public Sparkle update feed
+> are being finalized.
 
 ## Why another wrapper?
 
-The official `syncthing-macos` bundles the Syncthing binary **at build time** and
-couples its version to the wrapper's, so every Syncthing release needs a new
-wrapper release — which is why the bundled version drifts when the maintainer is
-away.
+The official [`syncthing-macos`](https://github.com/syncthing/syncthing-macos)
+bundles the Syncthing binary **at build time**, coupling the daemon's version to
+the wrapper's. Every Syncthing release needs a new wrapper release, so the
+bundled daemon drifts whenever the wrapper isn't updated in lockstep.
 
 Syncthing Menu is built around the opposite principle: **the daemon updates
-independently of the app.** The wrapper rarely needs a new release.
+independently of the app.** It downloads the official Syncthing binary at runtime
+and keeps it current on its own, so the menu-bar app itself rarely needs an
+update.
 
-## Design
+## How it works
 
-- **Native Swift + AppKit.** `NSStatusItem` menu-bar agent (`LSUIElement`), no
-  Dock icon. Minimal memory/idle footprint.
-- **Binary fetched at runtime, not bundled.** The official, Apple-signed,
-  universal Syncthing binary is downloaded from GitHub Releases into
-  `~/Library/Application Support/`, with its SHA-256 verified — so no Go
-  toolchain is ever needed here, and the daemon's Go version is whatever
-  upstream shipped.
-- **Two independent update channels:**
-  - *Daemon:* either Syncthing's own signature-verified self-upgrader, or an
-    app-managed poll-and-replace (decision still open — see below).
-  - *App:* [Sparkle](https://sparkle-project.org), only for actual app changes.
+- **Native Swift + AppKit.** An `NSStatusItem` menu-bar agent (`LSUIElement`) —
+  no Dock icon, minimal idle footprint.
+- **Daemon fetched at runtime, not bundled.** On first launch the app downloads
+  the official, Apple-signed, universal Syncthing binary from Syncthing's GitHub
+  Releases into `~/Library/Application Support/Syncthing Menu/`, verifying its
+  SHA-256. No Go toolchain is ever needed, and the daemon's Go version is exactly
+  what upstream shipped.
+- **The app owns daemon updates.** Syncthing's autonomous self-upgrade timer is
+  disabled; instead the app checks for new releases and applies them on your
+  terms (see **Updates** below). Minor updates can install automatically; major
+  versions always ask first.
+- **The app updates itself via [Sparkle](https://sparkle-project.org)** — only
+  for actual changes to the menu-bar app, which are rare.
 
-## Project layout
+## The menu
 
-```
-Sources/                 Swift sources + asset catalog (file-system-synchronized group)
-  main.swift             Explicit entry point (NSApplication setup)
-  AppDelegate.swift      Lifecycle owner
-  StatusItemController.swift  Menu-bar item + menu
-  SyncthingProcess.swift Daemon supervisor (stub)
-  ReleaseUpdater.swift   Binary download + checksum verify (stub)
-Config/                  Info.plist + entitlements (referenced via build settings)
-Scripts/                 sign-and-notarize.sh, make-dmg.sh (stubs)
-.github/workflows/       ci.yml (unsigned build), release.yml (stub)
-SyncthingMenu.xcodeproj  App target
-```
+Click the menu-bar icon for:
+
+- **Syncthing status** — running, starting, stopped, or an error.
+- **Open Web UI…** — opens Syncthing's full web interface in your browser.
+- **Settings…** — update preferences for both Syncthing and the app, plus Full
+  Disk Access setup.
+- **Quit** — stops the daemon cleanly, then exits.
+
+The menu-bar icon itself reflects state: a quiet monochrome mark when all is
+well, an error variant when the daemon can't run, and a badged variant when an
+update is available.
+
+## Permissions
+
+Syncthing runs as a background process that the app manages directly, so on a
+couple of occasions macOS may ask you to grant it access. This is expected.
+
+### Local Network
+
+The first time Syncthing tries to reach other devices, macOS shows a **Local
+Network** prompt. Allow it — Syncthing needs local-network access to discover
+and sync with your other machines.
+
+### Full Disk Access (only sometimes)
+
+macOS protects certain locations (Desktop, Documents, Pictures, Downloads, and
+external/network volumes). If you sync a folder in one of those, Syncthing may
+need **Full Disk Access**. Folders in ordinary locations need nothing.
+
+Settings includes a **Set Up Full Disk Access…** helper that reveals the exact
+file to grant and opens the right System Settings pane. One important detail: the
+file to enable is the lowercase **`syncthing`** binary this app manages — if you
+also run the standalone Syncthing app, that's a separate entry and granting it
+won't help.
+
+## Updates
+
+Two independent update channels, each surfaced in Settings:
+
+- **Syncthing (the daemon):** auto-check is on by default. Automatic install of
+  *minor* updates is off by default (you can turn it on); *major* updates always
+  ask first. After an update is applied, the app restarts the daemon so it comes
+  back up cleanly.
+- **Syncthing Menu (the app):** delivered through Sparkle; auto-check is on by
+  default.
 
 ## Building
 
@@ -60,10 +99,26 @@ xcodebuild -project SyncthingMenu.xcodeproj -target SyncthingMenu \
 To run a locally signed build from Xcode, set your team in the target's
 **Signing & Capabilities** tab.
 
-## Open decisions
+## Project layout
 
-- **Update ownership:** Syncthing self-upgrade vs. app-managed download — the
-  next architectural decision (shapes `SyncthingProcess` / `ReleaseUpdater`).
+```
+Sources/                 Swift sources + asset catalog (file-system-synchronized group)
+  main.swift             Explicit entry point (NSApplication setup)
+  AppDelegate.swift      Lifecycle owner
+  StatusItemController.swift   Menu-bar item, menu, and state-driven icon
+  SyncthingProcess.swift Daemon supervisor (spawn / graceful stop / restart)
+  SyncthingAPI.swift     Syncthing REST client
+  SyncthingConfig.swift  Daemon configuration (disables the self-upgrade timer)
+  ReleaseUpdater.swift   Daemon binary download + checksum verify
+  SyncthingUpdateSource.swift  Daemon update checks via REST
+  SparkleUpdateSource.swift    App update checks via Sparkle
+  Settings*.swift        Settings window + view
+  FullDiskAccessSection.swift  FDA explainer + help sheet
+Config/                  Info.plist + entitlements (referenced via build settings)
+Scripts/                 sign-and-notarize.sh, dev/render helpers
+.github/workflows/       ci.yml (unsigned build), release.yml
+SyncthingMenu.xcodeproj  App target
+```
 
 ## Distribution identity
 
@@ -72,9 +127,18 @@ app's identity for preferences and the Sparkle update feed).
 
 Signed with an **Individual** Apple Developer ID, so the code signature reads
 `Developer ID Application: Greg Friedman (<TeamID>)`. The 10-character Team ID
-may appear in project files once signing is configured in Xcode; that's expected
-and not sensitive. The signing certificate and notarization credentials are
-never committed (see `.gitignore`).
+may appear in project files once signing is configured; that's expected and not
+sensitive. Signing certificates and notarization credentials are never committed
+(see `.gitignore`).
+
+## Acknowledgments
+
+[Syncthing](https://syncthing.net) is an independent project; this is an
+unofficial wrapper and is not affiliated with or endorsed by it. Syncthing Menu
+downloads and runs the official Syncthing binary unmodified.
+
+The Syncthing logo used in this app is © The Syncthing Authors / Kastelo AB and
+is licensed under the [Mozilla Public License 2.0](https://www.mozilla.org/MPL/2.0/).
 
 ## License
 

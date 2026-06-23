@@ -18,6 +18,39 @@
       "dependsOrder": "sequence",
       "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
       "problemMatcher": []
+    },
+    {
+      "label": "Store Notarization Credentials (one-time)",
+      "detail": "Save the App Store Connect API key into the keychain as the 'syncthing-menu' notarytool profile. Run once; needed before 'Sign & Notarize'.",
+      "type": "shell",
+      "command": "xcrun notarytool store-credentials syncthing-menu --key \"${input:p8Path}\" --key-id \"${input:keyId}\" --issuer \"${input:issuerId}\"",
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Sign & Notarize (Release)",
+      "detail": "Archive, Developer ID sign, notarize, and staple SyncthingMenu.app into build/export. Requires the 'syncthing-menu' notarytool profile (see one-time task).",
+      "type": "shell",
+      "command": "NOTARY_PROFILE=syncthing-menu \"${workspaceFolder}/Scripts/sign-and-notarize.sh\"",
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "p8Path",
+      "type": "promptString",
+      "description": "Path to the App Store Connect API key (AuthKey_XXXXXXXXXX.p8)"
+    },
+    {
+      "id": "keyId",
+      "type": "promptString",
+      "description": "App Store Connect API Key ID (10 characters)"
+    },
+    {
+      "id": "issuerId",
+      "type": "promptString",
+      "description": "App Store Connect Issuer ID (UUID)"
     }
   ]
 }
