@@ -6,6 +6,7 @@ final class StatusItemController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private let onOpenSettings: () -> Void
+    private let onAbout: () -> Void
 
     private var statusMenuItem: NSMenuItem?
     private var webUIItem: NSMenuItem?
@@ -15,8 +16,9 @@ final class StatusItemController: NSObject {
     private var daemonState: SyncthingProcess.State = .stopped
     private var updateAvailable = false
 
-    init(onOpenSettings: @escaping () -> Void) {
+    init(onOpenSettings: @escaping () -> Void, onAbout: @escaping () -> Void) {
         self.onOpenSettings = onOpenSettings
+        self.onAbout = onAbout
         super.init()
         buildMenu()
         statusItem.menu = menu
@@ -76,6 +78,13 @@ final class StatusItemController: NSObject {
         // We manage item enablement ourselves.
         menu.autoenablesItems = false
 
+        let aboutItem = menu.addItem(withTitle: "About Syncthing Menu",
+                                     action: #selector(openAbout),
+                                     keyEquivalent: "")
+        aboutItem.target = self
+
+        menu.addItem(.separator())
+
         let status = NSMenuItem(title: "Syncthing: not running", action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
@@ -105,6 +114,10 @@ final class StatusItemController: NSObject {
 
     @objc private func openSettings() {
         onOpenSettings()
+    }
+
+    @objc private func openAbout() {
+        onAbout()
     }
 
     @objc private func openWebUI() {

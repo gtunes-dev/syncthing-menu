@@ -7,6 +7,7 @@ import Combine
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: StatusItemController?
     private var settingsWindowController: SettingsWindowController?
+    private var aboutWindowController: AboutWindowController?
     private let loginItem = LoginItemController()
     private let releaseUpdater = ReleaseUpdater()
     private let syncthingProcess = SyncthingProcess()
@@ -26,8 +27,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         settingsWindowController = settingsController
 
+        let aboutController = AboutWindowController(
+            syncthingVersion: { [weak self] in self?.syncthingUpdateSource.currentVersion }
+        )
+        aboutWindowController = aboutController
+
         statusItemController = StatusItemController(
-            onOpenSettings: { settingsController.show() }
+            onOpenSettings: { settingsController.show() },
+            onAbout: { aboutController.show() }
         )
 
         // Reflect the daemon's live state in the menu, and connect/disconnect the
@@ -83,4 +90,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if case .available = state { return true }
         return false
     }
+
 }

@@ -2,10 +2,10 @@ import SwiftUI
 
 /// The Settings window content.
 ///
-/// Two clearly partitioned cards — Syncthing (primary) above the app itself —
-/// each leading with the most informational/actionable items (current version in
-/// the header, then update status and its action) and placing set-and-forget
-/// preferences below a divider.
+/// Two clearly partitioned cards — Syncthing Menu (this app) above the Syncthing
+/// daemon it manages — each leading with the most informational/actionable items
+/// (current version in the header, then update status and its action) and placing
+/// set-and-forget preferences below a divider.
 struct SettingsView: View {
     @ObservedObject var settings: Settings
     @ObservedObject var appSource: UpdateSource
@@ -18,7 +18,23 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            // Primary: the Syncthing daemon.
+            // Primary: this menu-bar app.
+            SettingsCard(title: "Syncthing Menu",
+                         version: appVersion,
+                         icon: { Image("AppMark").resizable().scaledToFit() }) {
+                UpdateStatusRow(source: appSource)
+
+                Divider()
+
+                Toggle("Automatically check for updates",
+                       isOn: $settings.appAutoCheckEnabled)
+                Toggle("Open at login", isOn: Binding(
+                    get: { loginItem.isEnabled },
+                    set: { loginItem.setEnabled($0) }
+                ))
+            }
+
+            // Secondary: the Syncthing daemon it manages.
             SettingsCard(title: "Syncthing",
                          version: syncthingSource.currentVersion ?? "Not installed",
                          icon: { Image("SyncthingLogo").resizable().scaledToFit() }) {
@@ -38,22 +54,6 @@ struct SettingsView: View {
                 Divider()
 
                 FullDiskAccessSection(binaryURL: ReleaseUpdater.installedBinaryURL)
-            }
-
-            // Secondary: this menu-bar app.
-            SettingsCard(title: "Syncthing Menu",
-                         version: appVersion,
-                         icon: { Image("AppMark").resizable().scaledToFit() }) {
-                UpdateStatusRow(source: appSource)
-
-                Divider()
-
-                Toggle("Automatically check for updates",
-                       isOn: $settings.appAutoCheckEnabled)
-                Toggle("Open at login", isOn: Binding(
-                    get: { loginItem.isEnabled },
-                    set: { loginItem.setEnabled($0) }
-                ))
             }
         }
         .padding(20)
