@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: StatusItemController?
     private var settingsWindowController: SettingsWindowController?
     private var aboutWindowController: AboutWindowController?
+    /// The running daemon's GUI URL (for ad-hoc REST calls like the folder list).
+    private var currentGUIURL: String?
     private let loginItem = LoginItemController()
     private let releaseUpdater = ReleaseUpdater()
     private let syncthingProcess = SyncthingProcess()
@@ -32,10 +34,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         aboutWindowController = aboutController
 
-        statusItemController = StatusItemController(
+        let controller = StatusItemController(
             onOpenSettings: { settingsController.show() },
             onAbout: { aboutController.show() }
         )
+        controller.onMenuWillOpen = { [weak self] in self?.refreshFolders() }
+        statusItemController = controller
 
         // Reflect the daemon's live state in the menu, and connect/disconnect the
         // Syncthing update source as the daemon comes up / goes down.
@@ -44,11 +48,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.statusItemController?.update(daemonState: state)
             switch state {
             case let .running(guiURL):
+                self.currentGUIURL = guiURL
                 if let key = self.syncthingProcess.apiKey {
                     self.syncthingUpdateSource.connect(baseURL: guiURL, apiKey: key)
                 }
+                self.refreshFolders()
             case .stopped, .starting, .failed:
+                self.currentGUIURL = nil
                 self.syncthingUpdateSource.disconnect()
+                self.statusItemController?.update(folders: [])
             }
         }
 
@@ -89,6 +97,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static func isUpdateAvailable(_ state: UpdateState) -> Bool {
         if case .available = state { return true }
         return false
+    }
+
+    /// Fetch the daemon's configured folders and push them to the menu. Leaves the
+    /// current list untouched on a transient failure; clears it when the daemon
+    /// isn't reachable.
+    private func refreshFolders() {
+        guard let urlString = currentGUIURL, let url = URL(string: urlString),
+              let key = syncthingProcess.apiKey else {
+            statusItemController?.update(folders: [])
+            return
+        }
+        let api = SyncthingAPI(baseURL: url, apiKey: key)
+        Task { @MainActor in
+            guard let folders = try? await api.folders() else { return }
+            self.statusItemController?.update(folders: folders.map {
+                StatusItemController.FolderEntry(name: $0.label.isEmpty ? $0.id : $0.label,
+                                                 path: $0.path)
+            })
+        }
     }
 
 }

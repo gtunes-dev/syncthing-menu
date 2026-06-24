@@ -60,6 +60,22 @@ struct SyncthingAPI {
         _ = try await send("/rest/config/options", method: "PATCH", body: body)
     }
 
+    // MARK: Folders
+
+    /// One configured sync folder. Decoded from `/rest/config/folders`; the many
+    /// other fields in the response are ignored.
+    struct Folder: Decodable, Equatable {
+        let id: String
+        let label: String
+        let path: String
+    }
+
+    /// `GET /rest/config/folders` → the configured folders (id, label, filesystem path).
+    func folders() async throws -> [Folder] {
+        let data = try await send("/rest/config/folders", method: "GET")
+        return try JSONDecoder().decode([Folder].self, from: data)
+    }
+
     // MARK: - Request plumbing
 
     private func send(_ path: String, method: String, body: Data? = nil) async throws -> Data {

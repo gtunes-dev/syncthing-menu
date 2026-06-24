@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Folders submenu in the menu bar — lists your synced folders; selecting one opens it in Finder.
+
+### Changed
+- Reorganized the menu so the app's own items (About, Settings) group above the Syncthing items, and renamed them for clarity.
+- The app bundle is now named **Syncthing Menu.app** (previously SyncthingMenu.app).
+
 ## [0.1.1] - 2026-06-23
 
 ### Added
