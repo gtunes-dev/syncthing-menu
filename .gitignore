@@ -25,3 +25,7 @@ buildServer.json
 AuthKey_*.p8
 .env
 .env.*
+
+# Local Claude Code context (personal notes — not synced)
+CLAUDE.local.md
+.claude/notes/
