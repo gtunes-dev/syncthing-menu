@@ -3,7 +3,7 @@
 # sign-and-notarize.sh — build, Developer ID sign, notarize, and staple the app,
 # producing the distributable .zip the release uses.
 #
-# Release model: a single .zip of the notarized+stapled SyncthingMenu.app is the
+# Release model: a single .zip of the notarized+stapled Syncthing Menu.app is the
 # GitHub Release asset. It does double duty — the human first-install download
 # (unzip, drag to /Applications) AND Sparkle's auto-update enclosure. No DMG, no
 # bare .app. (A DMG is optional first-install polish we may add later; it would
@@ -60,7 +60,7 @@ BUILD_DIR="${BUILD_DIR:-build}"
 
 ARCHIVE_PATH="$BUILD_DIR/SyncthingMenu.xcarchive"
 EXPORT_DIR="$BUILD_DIR/export"
-APP_PATH="$EXPORT_DIR/SyncthingMenu.app"
+APP_PATH="$EXPORT_DIR/Syncthing Menu.app"
 
 # Optional version overrides (CI passes these from the git tag). Unset → the
 # project's own MARKETING_VERSION / CURRENT_PROJECT_VERSION are used.
@@ -137,7 +137,7 @@ codesign --display --verbose=4 "$APP_PATH" 2>&1 | grep -E "Authority=Developer I
     || die "Signature is missing the Developer ID authority or hardened-runtime flag."
 
 VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PATH/Contents/Info.plist")"
-log "Signed SyncthingMenu.app (version $VERSION) — signature OK."
+log "Signed Syncthing Menu.app (version $VERSION) — signature OK."
 
 if [[ -n "${SKIP_NOTARIZE:-}" ]]; then
     log "SKIP_NOTARIZE set — stopping after signing (no notarization, no .zip)."

@@ -3,7 +3,7 @@
   "tasks": [
     {
       "label": "Build (Debug)",
-      "detail": "Compile SyncthingMenu.app, ad-hoc signed, with deterministic output in build/Debug.",
+      "detail": "Compile Syncthing Menu.app, ad-hoc signed, with deterministic output in build/Debug.",
       "type": "shell",
       "command": "xcodebuild -project SyncthingMenu.xcodeproj -scheme SyncthingMenu -configuration Debug CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES CONFIGURATION_BUILD_DIR=\"${workspaceFolder}/build/Debug\" build",
       "group": { "kind": "build", "isDefault": true },
@@ -13,10 +13,25 @@
       "label": "Run",
       "detail": "Build, then launch the app in the foreground so console logs (print/os_log) appear here. Stop with Ctrl+C or the app's Quit menu.",
       "type": "shell",
-      "command": "\"${workspaceFolder}/build/Debug/SyncthingMenu.app/Contents/MacOS/SyncthingMenu\"",
+      "command": "\"${workspaceFolder}/build/Debug/Syncthing Menu.app/Contents/MacOS/Syncthing Menu\"",
       "dependsOn": "Build (Debug)",
       "dependsOrder": "sequence",
       "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Clean",
+      "detail": "Remove build/ (Debug app, archives, exports, zips) and clean Xcode's DerivedData intermediates for the project.",
+      "type": "shell",
+      "command": "rm -rf \"${workspaceFolder}/build\" && xcodebuild -project SyncthingMenu.xcodeproj -scheme SyncthingMenu clean",
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Clean Build (Debug)",
+      "detail": "Clean, then build Debug from scratch — use when stale artifacts or cached assets linger.",
+      "dependsOn": [ "Clean", "Build (Debug)" ],
+      "dependsOrder": "sequence",
       "problemMatcher": []
     },
     {
@@ -29,7 +44,7 @@
     },
     {
       "label": "Sign & Notarize (Release)",
-      "detail": "Archive, Developer ID sign, notarize, and staple SyncthingMenu.app into build/export. Requires the 'syncthing-menu' notarytool profile (see one-time task).",
+      "detail": "Archive, Developer ID sign, notarize, and staple Syncthing Menu.app into build/export. Requires the 'syncthing-menu' notarytool profile (see one-time task).",
       "type": "shell",
       "command": "NOTARY_PROFILE=syncthing-menu \"${workspaceFolder}/Scripts/sign-and-notarize.sh\"",
       "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },

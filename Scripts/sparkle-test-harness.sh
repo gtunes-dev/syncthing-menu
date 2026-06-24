@@ -46,7 +46,7 @@ xcodebuild -project SyncthingMenu.xcodeproj -scheme SyncthingMenu -configuration
 
 echo "==> Packaging update zip…"
 ( cd "$STAGE/app" && ditto -c -k --sequesterRsrc --keepParent \
-    SyncthingMenu.app "$STAGE/SyncthingMenu-$TEST_VERSION.zip" )
+    "Syncthing Menu.app" "$STAGE/SyncthingMenu-$TEST_VERSION.zip" )
 rm -rf "$STAGE/app"
 
 echo "==> Generating signed appcast (may prompt for Keychain access to the EdDSA key)…"
@@ -62,7 +62,7 @@ Signed appcast ready. Serving $STAGE at $BASE
 In ANOTHER terminal, launch the CURRENT build pointed at the feed:
 
   SPARKLE_TEST_FEED_URL="$FEED" \\
-    "$ROOT/build/Debug/SyncthingMenu.app/Contents/MacOS/SyncthingMenu"
+    "$ROOT/build/Debug/Syncthing Menu.app/Contents/MacOS/Syncthing Menu"
 
 Expect: the launch check finds $TEST_VERSION -> menu-bar icon shows the update
 badge; "Check for Updates" shows Sparkle's window; it can download. The final
