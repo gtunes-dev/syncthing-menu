@@ -96,14 +96,18 @@ won't help.
 
 ## Updates
 
-Two independent update channels, each surfaced in Settings:
+Two independent update channels, surfaced as matching cards in Settings:
 
 - **Syncthing (the daemon):** auto-check is on by default. Automatic install of
   *minor* updates is off by default (you can turn it on); *major* updates always
   ask first. After an update is applied, the app restarts the daemon so it comes
   back up cleanly.
 - **Syncthing Menu (the app):** delivered through Sparkle; auto-check is on by
-  default.
+  default. Automatic install is off by default — with it on, updates download in
+  the background and install silently, no dialogs.
+
+Every version shown is a link to its release notes, and each card notes when it
+last checked.
 
 <p align="center">
   <img src="docs/settings.png" alt="The Syncthing Menu Settings window" width="440">
