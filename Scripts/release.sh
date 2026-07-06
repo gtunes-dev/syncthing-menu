@@ -74,7 +74,9 @@ awk -v ver="$VERSION" -v date="$(date +%F)" '
 ' "$CHANGELOG" > "$CHANGELOG.tmp" && mv "$CHANGELOG.tmp" "$CHANGELOG"
 
 # ── Bump version ──────────────────────────────────────────────────────────────
-log "Setting MARKETING_VERSION = $VERSION…"
+# ${VERSION} braced: bash 3.2 under some locales (e.g. C.UTF-8) parses a multibyte
+# char right after an unbraced expansion as part of the variable name → set -u dies.
+log "Setting MARKETING_VERSION = ${VERSION}…"
 sed -i '' -E "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = $VERSION;/g" "$PROJ"
 
 git add "$PROJ" "$CHANGELOG"
