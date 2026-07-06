@@ -133,8 +133,10 @@ Sources/                 Swift sources + asset catalog (file-system-synchronized
   SyncthingAPI.swift     Syncthing REST client
   SyncthingConfig.swift  Daemon configuration (disables the self-upgrade timer)
   ReleaseUpdater.swift   Daemon binary download + checksum verify
-  SyncthingUpdateSource.swift  Daemon update checks via REST
-  SparkleUpdateSource.swift    App update checks via Sparkle
+  UpdateState.swift      Shared update policy engine (UpdateSource) + install coordinator
+  SyncthingUpdateSource.swift  Syncthing update channel (REST)
+  AppUpdateSource.swift  App update channel (Sparkle, silent background install)
+  ReleaseNotes*.swift    Release-notes URLs + link view
   Settings*.swift        Settings window + view
   FullDiskAccessSection.swift  FDA explainer + help sheet
 Config/                  Info.plist + entitlements (referenced via build settings)

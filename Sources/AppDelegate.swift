@@ -1,9 +1,8 @@
 import AppKit
 import Combine
 
-/// Application lifecycle owner. Holds the menu-bar controller, the settings
-/// window, and the update sources. Will later own the Syncthing subprocess
-/// supervisor and the real update coordinator.
+/// Application lifecycle owner. Owns the menu-bar controller, the settings and about
+/// windows, the Syncthing subprocess supervisor, and the two update channels.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: StatusItemController?
     private var settingsWindowController: SettingsWindowController?
@@ -15,10 +14,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let syncthingProcess = SyncthingProcess()
     private var cancellables = Set<AnyCancellable>()
 
-    // Update sources, each conforming to the same `UpdateSource` surface: the app
-    // updates via Sparkle, Syncthing via its REST API.
-    private let appUpdateSource: UpdateSource = SparkleUpdateSource()
-    private let syncthingUpdateSource = SyncthingUpdateSource(settings: .shared)
+    // Update channels behind the shared `UpdateSource` policy engine: the app via
+    // Sparkle, Syncthing via its REST API.
+    private let appUpdateSource = AppUpdateSource(settings: Settings.shared.app)
+    private let syncthingUpdateSource = SyncthingUpdateSource(settings: Settings.shared.syncthing)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let settingsController = SettingsWindowController(
@@ -76,6 +75,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.statusItemController?.setUpdateAvailable(available)
             }
             .store(in: &cancellables)
+
+        // The app update channel is available from launch, independent of the daemon.
+        // (Debug builds keep it off unless SPARKLE_TEST_FEED_URL is set.)
+        appUpdateSource.makeAvailable()
 
         // Bootstrap the binary (download + verify if needed), then launch the
         // managed daemon.

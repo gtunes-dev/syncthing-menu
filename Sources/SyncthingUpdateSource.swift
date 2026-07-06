@@ -1,179 +1,96 @@
 import Foundation
-import Combine
 
-/// The real Syncthing update source, backed by the daemon's REST API. Replaces
-/// `MockUpdateSource` for the Syncthing card.
-///
-/// It is "connected" while the daemon is running (given its base URL + API key)
-/// and reports `.unknown` when the daemon is stopped. Update availability maps
-/// straight onto the `UpdateState` contract the UI already renders — including the
-/// major-vs-minor gating, which Syncthing sequences for us (`majorNewer` only goes
-/// true once no minor upgrade is pending).
-///
-/// Behavior is driven by `Settings`:
-/// - while *auto-check* is on, it polls on a timer (plus the check at connect);
-/// - after a check that finds a **minor**, it auto-installs only if *auto-install*
-///   is effective. Majors are never auto-installed — they wait for explicit consent.
+/// The Syncthing update channel: an `UpdateSource` whose mechanism is the daemon's
+/// REST API. It is available while the daemon is running (given its base URL + API
+/// key) and gates major updates — Syncthing sequences a pending minor ahead of a
+/// major (`majorNewer` only goes true once no minor is pending), so a major surfaces
+/// alone and waits for explicit consent.
 final class SyncthingUpdateSource: UpdateSource {
-    private let settings: Settings
-    private var api: SyncthingAPI?
-    /// Bumped on every connect/disconnect so an in-flight readiness wait can detect
-    /// it has been superseded.
-    private var connectionEpoch = 0
-    private var pollTimer: Timer?
-    private var cancellables = Set<AnyCancellable>()
-
-    /// Called after an upgrade has been applied and the daemon has restarted onto the
-    /// new version. The app uses this to cleanly restart the daemon so its supervisor
-    /// re-roots on `syncthing` (fresh disclaim) instead of the renamed `syncthing.old`.
+    /// Run after an upgrade settles so the app re-roots the daemon supervisor onto the
+    /// canonical `syncthing` (fresh disclaim) instead of the renamed `syncthing.old`.
     var onUpgradeApplied: (() -> Void)?
 
-    /// How often to poll for updates while auto-check is enabled.
-    private let pollInterval: TimeInterval = 6 * 3600
+    private var api: SyncthingAPI?
+    /// Bumped on every connect/disconnect so an in-flight readiness wait can detect it
+    /// has been superseded.
+    private var connectionToken = 0
 
-    init(settings: Settings) {
-        self.settings = settings
-        super.init(name: "Syncthing")
-        // `.receive(on:)` defers past @Published's willSet emission so the handlers
-        // read the NEW values. (Reading the property inside a plain sink sees the OLD
-        // value, which silently inverted the auto-install toggle.)
-        //
-        // Start/stop polling live as the auto-check toggle changes. Polling is
-        // driven ONLY by auto-check — the auto-install toggle never affects it.
-        settings.$syncthingAutoCheckEnabled
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.updatePolling() }
-            .store(in: &cancellables)
-        // When auto-install is turned on, apply a pending MINOR right away.
-        settings.$syncthingAutoInstallEnabled
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.autoInstallToggled() }
-            .store(in: &cancellables)
+    /// Upper bound (seconds) on waiting for a self-upgrade to settle — the daemon
+    /// downloads the new binary from upgrades.syncthing.net, swaps it, and restarts its
+    /// worker. We re-root regardless once this elapses, so it only needs to be generous.
+    private let upgradeSettleTimeout: TimeInterval = 90
+
+    init(settings: UpdateChannelSettings) {
+        super.init(name: "Syncthing", settings: settings,
+                   pollInterval: 6 * 3600, gatesMajorUpdates: true)
     }
 
-    /// When *Install automatically* becomes effective while a **minor** update is
-    /// already showing, apply it immediately. Majors always require explicit consent
-    /// and are never auto-installed here. Does not touch polling.
-    private func autoInstallToggled() {
-        guard settings.syncthingAutoInstallEffective else { return }
-        if case let .available(_, isMajor) = state, !isMajor {
-            installAvailable()
-        }
+    override func releaseNotesURL(for version: String) -> URL? {
+        ReleaseNotes.syncthing(version: version)
     }
 
-    /// Connect to the running daemon: wait for its REST API to come up, enforce our
-    /// auto-upgrade invariant via REST (not the config file), do an initial check,
-    /// and begin polling if enabled.
+    // MARK: - Daemon lifecycle
+
+    /// The daemon is running and reachable. Wait for its REST API, enforce our
+    /// no-self-upgrade invariant, then begin the update policy.
     func connect(baseURL: String, apiKey: String) {
         guard let url = URL(string: baseURL) else { return }
-        connectionEpoch &+= 1
-        let epoch = connectionEpoch
+        connectionToken &+= 1
+        let token = connectionToken
         let api = SyncthingAPI(baseURL: url, apiKey: apiKey)
         self.api = api
-        state = .checking
         Task { @MainActor in
             // Poll until the daemon answers (up to ~30s), bailing if superseded.
             for _ in 0..<60 {
-                guard self.connectionEpoch == epoch else { return }
+                guard self.connectionToken == token else { return }
                 if (try? await api.systemVersion()) != nil { break }
                 try? await Task.sleep(nanoseconds: 500_000_000)
             }
-            guard self.connectionEpoch == epoch else { return }
+            guard self.connectionToken == token else { return }
             try? await api.setAutoUpgradeIntervalH(0)
-            self.refresh(autoInstall: true)
-            self.updatePolling()
+            self.makeAvailable()
         }
     }
 
-    /// Daemon stopped/unavailable.
+    /// The daemon stopped or became unreachable.
     func disconnect() {
-        connectionEpoch &+= 1
+        connectionToken &+= 1
         api = nil
-        stopPolling()
-        state = .unknown
+        makeUnavailable()
     }
 
-    /// Public check (manual button / poll timer). Skipped mid-install so it doesn't
-    /// interfere with an upgrade in progress.
-    override func checkNow() {
-        if case .installing = state { return }
-        refresh(autoInstall: true)
+    // MARK: - Mechanism
+
+    override func fetchVersion() async -> String? {
+        try? await api?.systemVersion()
     }
 
-    override func installAvailable() {
-        guard let api, case .available = state else { return }
-        state = .installing
-        Task { @MainActor in
-            do {
-                try await api.performUpgrade()
-            } catch {
-                self.state = .unknown
-                return
-            }
-            // The daemon self-upgrades — it renames the running binary to `syncthing.old`,
-            // writes the new `syncthing`, and restarts its worker (its monitor keeps our
-            // process alive). Give it a moment to come up on the new version, then ask the
-            // app to restart the daemon cleanly so its supervisor re-roots on the canonical
-            // `syncthing` (fresh disclaim) instead of staying backed by `syncthing.old`.
-            // The restart's reconnect refreshes our state; if no handler is wired, fall back
-            // to a plain re-check (autoInstall:false to avoid a retry loop).
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
-            if let onUpgradeApplied = self.onUpgradeApplied {
-                onUpgradeApplied()
-            } else {
-                self.refresh(autoInstall: false)
-            }
+    override func checkForUpdate() async throws -> UpdateState {
+        guard let api else { throw SyncthingAPI.APIError.badURL }
+        let info = try await api.upgradeInfo()
+        if info.majorNewer { return .available(version: info.latest, isMajor: true) }
+        if info.newer { return .available(version: info.latest, isMajor: false) }
+        return .upToDate
+    }
+
+    override func applyUpdate() async throws {
+        guard let api else { throw SyncthingAPI.APIError.badURL }
+        let from = currentVersion
+        // The daemon downloads + SHA-verifies the new binary, renames the running
+        // `syncthing` to `syncthing.old`, writes the new one, and restarts its worker
+        // (its monitor keeps our process alive). Wait for it to come up on the new
+        // version before re-rooting.
+        try await api.performUpgrade()
+        let deadline = Date().addingTimeInterval(upgradeSettleTimeout)
+        while Date() < deadline {
+            if let version = try? await api.systemVersion(), version != from { return }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
     }
 
-    /// Query upgrade availability and update `state`. When `autoInstall` is true and
-    /// a *minor* is available with auto-install effective, kick off the install.
-    /// Used directly by the post-install re-check (which must bypass `checkNow`'s
-    /// mid-install guard).
-    private func refresh(autoInstall: Bool) {
-        guard let api else { state = .unknown; return }
-        state = .checking
-        Task { @MainActor in
-            do {
-                let info = try await api.upgradeInfo()
-                self.currentVersion = info.running
-                if info.majorNewer {
-                    self.state = .available(version: info.latest, isMajor: true)
-                } else if info.newer {
-                    self.state = .available(version: info.latest, isMajor: false)
-                    if autoInstall && self.settings.syncthingAutoInstallEffective {
-                        self.installAvailable()
-                    }
-                } else {
-                    self.state = .upToDate
-                }
-            } catch {
-                // TODO (B3c): distinguish a transient connection drop and re-read
-                // config.xml to reconnect (self-healing).
-                self.state = .unknown
-            }
-        }
-    }
-
-    // MARK: - Polling
-
-    private func updatePolling() {
-        if api != nil && settings.syncthingAutoCheckEnabled {
-            startPolling()
-        } else {
-            stopPolling()
-        }
-    }
-
-    private func startPolling() {
-        guard pollTimer == nil else { return }
-        pollTimer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
-            self?.checkNow()
-        }
-    }
-
-    private func stopPolling() {
-        pollTimer?.invalidate()
-        pollTimer = nil
+    override func didApplyUpdate() {
+        // Re-root the supervisor onto the canonical `syncthing`; its reconnect drives a
+        // fresh check that settles the card.
+        onUpgradeApplied?()
     }
 }

@@ -7,8 +7,8 @@ import Darwin
 /// our app-support directory. We **never write Syncthing's `config.xml`** — we let
 /// Syncthing pick free GUI/listen ports (it does this itself), read the API key it
 /// generated, and pin the GUI port via a CLI flag using a value persisted on *our*
-/// side. The one option we enforce (`autoUpgradeIntervalH = 0`) is applied later via
-/// the REST API (B3), not by editing the file.
+/// side. The one option we enforce (`autoUpgradeIntervalH = 0`) is applied via the
+/// REST API, not by editing the file.
 final class SyncthingProcess {
     enum State: Equatable {
         case stopped
@@ -24,8 +24,7 @@ final class SyncthingProcess {
         didSet { onStateChange?(state) }
     }
 
-    /// The daemon's API key, read from `config.xml` once running. Used by the
-    /// (forthcoming) REST client.
+    /// The daemon's API key, read from `config.xml` once running. Used by the REST client.
     private(set) var apiKey: String?
 
     private let binaryURL: URL
@@ -294,7 +293,7 @@ final class SyncthingProcess {
             self.stdoutHandle?.readabilityHandler = nil
             self.stdoutHandle = nil
             if !self.isTerminating {
-                // TODO (B4): restart with backoff on unexpected exit.
+                // TODO: restart with backoff on unexpected exit.
                 self.state = .failed("Syncthing exited (\(Self.describe(status)))")
             }
         }

@@ -19,10 +19,9 @@ struct AboutView: View {
         NSApp.applicationIconImage ?? NSImage(named: "AppMark") ?? NSImage()
     }
 
-    /// The Syncthing version (if known) is folded into this line parenthetically.
-    private var syncthingLine: String {
-        let version = syncthingVersion.map { " (\($0))" } ?? ""
-        return "Runs the official Syncthing app\(version) — © The Syncthing Authors, "
+    /// Upstream attribution; the version and its release-notes link sit above this line.
+    private var syncthingAttribution: String {
+        "Runs the official Syncthing app — © The Syncthing Authors, "
             + "licensed under the MPL-2.0. The Syncthing logo is © Kastelo AB."
     }
 
@@ -38,6 +37,7 @@ struct AboutView: View {
                 Text("Version \(appVersion)")
                     .font(.body)
                     .foregroundStyle(.secondary)
+                ReleaseNotesLink(url: ReleaseNotes.app(version: appVersion))
             }
             .padding(.top, 26)
             .padding(.bottom, 22)
@@ -50,7 +50,15 @@ struct AboutView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(width: 28, height: 28)
-                Text(syncthingLine)
+                if let version = syncthingVersion {
+                    VStack(spacing: 6) {
+                        Text("Syncthing \(version)")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                        ReleaseNotesLink(url: ReleaseNotes.syncthing(version: version))
+                    }
+                }
+                Text(syncthingAttribution)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

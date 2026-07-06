@@ -27,9 +27,10 @@ final class SettingsWindowController {
     /// thereafter (single instance).
     func show() {
         if window == nil {
-            let root = SettingsView(settings: settings,
-                                    appSource: appSource,
+            let root = SettingsView(appSource: appSource,
                                     syncthingSource: syncthingSource,
+                                    appSettings: settings.app,
+                                    syncthingSettings: settings.syncthing,
                                     loginItem: loginItem)
             let hosting = NSHostingController(rootView: root)
             let newWindow = NSWindow(contentViewController: hosting)

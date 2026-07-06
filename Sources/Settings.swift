@@ -1,70 +1,97 @@
 import Foundation
 import Combine
 
-/// App-wide user settings, backed by `UserDefaults`.
+/// Persisted settings for one update channel (Syncthing Menu, or Syncthing), backed
+/// by `UserDefaults` under a per-channel key prefix. The update policy in
+/// `UpdateSource` reads `autoCheckEnabled` / `autoInstallEnabled` and records
+/// `lastChecked`; the Settings UI binds the two toggles.
 ///
-/// Deliberately a plain `ObservableObject` (not SwiftUI's `@AppStorage`) so that
-/// both the SwiftUI settings view *and* the non-SwiftUI update coordinator can
-/// read the same source of truth.
-final class Settings: ObservableObject {
-    /// Shared instance used throughout the app. Tests can construct their own
-    /// with an isolated `UserDefaults`.
-    static let shared = Settings()
-
-    private let defaults: UserDefaults
-
-    private enum Key {
-        static let syncthingAutoCheck = "syncthing.autoCheckEnabled"
-        static let syncthingAutoInstall = "syncthing.autoInstallEnabled"
-        static let appAutoCheck = "app.autoCheckEnabled"
-        static let lastSyncthingCheck = "syncthing.lastCheck"
+/// A plain `ObservableObject` (not `@AppStorage`) so the SwiftUI settings view and
+/// the non-SwiftUI update policy share one source of truth.
+final class UpdateChannelSettings: ObservableObject {
+    /// Whether the channel checks for updates on its own — at launch and on a timer.
+    @Published var autoCheckEnabled: Bool {
+        didSet { defaults.set(autoCheckEnabled, forKey: key("autoCheck")) }
     }
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        defaults.register(defaults: [
-            Key.syncthingAutoCheck: true,    // default: ON  (check)
-            Key.syncthingAutoInstall: false, // default: OFF (notify, don't act)
-            Key.appAutoCheck: true,
-        ])
-        // Load persisted values. (Assigning in init does not fire `didSet`.)
-        syncthingAutoCheckEnabled = defaults.bool(forKey: Key.syncthingAutoCheck)
-        syncthingAutoInstallEnabled = defaults.bool(forKey: Key.syncthingAutoInstall)
-        appAutoCheckEnabled = defaults.bool(forKey: Key.appAutoCheck)
-        lastSyncthingCheck = defaults.object(forKey: Key.lastSyncthingCheck) as? Date
+    /// Whether a found update is installed automatically. Takes effect only when
+    /// auto-check is also on (see `autoInstallEffective`).
+    @Published var autoInstallEnabled: Bool {
+        didSet { defaults.set(autoInstallEnabled, forKey: key("autoInstall")) }
     }
 
-    /// Whether the app periodically checks for new Syncthing releases.
-    @Published var syncthingAutoCheckEnabled: Bool {
-        didSet { defaults.set(syncthingAutoCheckEnabled, forKey: Key.syncthingAutoCheck) }
-    }
-
-    /// Whether minor/patch Syncthing updates are installed automatically.
-    /// Only meaningful when `syncthingAutoCheckEnabled` is true (the UI slaves it),
-    /// and never applies to major updates — those always require explicit consent.
-    @Published var syncthingAutoInstallEnabled: Bool {
-        didSet { defaults.set(syncthingAutoInstallEnabled, forKey: Key.syncthingAutoInstall) }
-    }
-
-    /// Whether the app checks for updates to itself (maps to Sparkle later).
-    @Published var appAutoCheckEnabled: Bool {
-        didSet { defaults.set(appAutoCheckEnabled, forKey: Key.appAutoCheck) }
-    }
-
-    /// Timestamp of the last Syncthing update check, for the "Last checked…" line.
-    @Published var lastSyncthingCheck: Date? {
+    /// When the channel last completed a check — drives the "Last checked" line.
+    @Published var lastChecked: Date? {
         didSet {
-            if let date = lastSyncthingCheck {
-                defaults.set(date, forKey: Key.lastSyncthingCheck)
+            if let lastChecked {
+                defaults.set(lastChecked, forKey: key("lastChecked"))
             } else {
-                defaults.removeObject(forKey: Key.lastSyncthingCheck)
+                defaults.removeObject(forKey: key("lastChecked"))
             }
         }
     }
 
-    /// Auto-install only takes effect when auto-check is also on. The update
-    /// coordinator should consult this rather than the raw flag.
-    var syncthingAutoInstallEffective: Bool {
-        syncthingAutoCheckEnabled && syncthingAutoInstallEnabled
+    /// Auto-install applies only alongside auto-check.
+    var autoInstallEffective: Bool { autoCheckEnabled && autoInstallEnabled }
+
+    private let defaults: UserDefaults
+    private let prefix: String
+    private func key(_ name: String) -> String { "\(prefix).\(name)" }
+
+    init(defaults: UserDefaults, prefix: String,
+         autoCheckDefault: Bool, autoInstallDefault: Bool) {
+        self.defaults = defaults
+        self.prefix = prefix
+        defaults.register(defaults: [
+            "\(prefix).autoCheck": autoCheckDefault,
+            "\(prefix).autoInstall": autoInstallDefault,
+        ])
+        // Assigning in init does not fire `didSet`, so these loads don't re-persist.
+        autoCheckEnabled = defaults.bool(forKey: "\(prefix).autoCheck")
+        autoInstallEnabled = defaults.bool(forKey: "\(prefix).autoInstall")
+        lastChecked = defaults.object(forKey: "\(prefix).lastChecked") as? Date
+    }
+}
+
+/// App-wide settings: one `UpdateChannelSettings` per update channel. Persisted under
+/// bundle id `io.github.gtunes-dev.SyncthingMenu`. Tests construct their own with an
+/// isolated `UserDefaults`.
+final class Settings {
+    static let shared = Settings()
+
+    let app: UpdateChannelSettings
+    let syncthing: UpdateChannelSettings
+
+    init(defaults: UserDefaults = .standard) {
+        Self.migrateLegacyKeys(in: defaults)
+        // Default: check on, install off (surface updates, but don't apply unattended).
+        app = UpdateChannelSettings(defaults: defaults, prefix: "app",
+                                    autoCheckDefault: true, autoInstallDefault: false)
+        syncthing = UpdateChannelSettings(defaults: defaults, prefix: "syncthing",
+                                          autoCheckDefault: true, autoInstallDefault: false)
+    }
+
+    /// One-time rename from the 0.1.x flat keys to the per-channel scheme, so an
+    /// updated install keeps its toggles. Only values the user actually persisted
+    /// migrate — the old registration domain is gone, so `object(forKey:)` can't see
+    /// stale defaults. Each old key is removed after copying; a no-op thereafter.
+    ///
+    /// TEMPORARY — introduced in 0.1.3 (July 2026). Delete this (and its call above)
+    /// once an update directly from ≤0.1.2 is implausible: any release from ~Jan 2027
+    /// on, or sooner after a few intervening releases.
+    private static func migrateLegacyKeys(in defaults: UserDefaults) {
+        let renames = [
+            "app.autoCheckEnabled": "app.autoCheck",
+            "syncthing.autoCheckEnabled": "syncthing.autoCheck",
+            "syncthing.autoInstallEnabled": "syncthing.autoInstall",
+            "syncthing.lastCheck": "syncthing.lastChecked",
+        ]
+        for (old, new) in renames {
+            guard let value = defaults.object(forKey: old) else { continue }
+            if defaults.object(forKey: new) == nil {
+                defaults.set(value, forKey: new)
+            }
+            defaults.removeObject(forKey: old)
+        }
     }
 }

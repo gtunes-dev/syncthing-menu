@@ -3,8 +3,8 @@ import CryptoKit
 
 /// Downloads the official Syncthing macOS binary from GitHub Releases, verifies
 /// its SHA-256, and installs it into the app's private support directory — the
-/// initial "bootstrap". Ongoing updates are later handled by the daemon itself
-/// (via its REST upgrade API), not here.
+/// initial "bootstrap". Ongoing updates are handled by the daemon itself (via its
+/// REST upgrade API), not here.
 ///
 /// NOTE (first slice): this verifies the SHA-256 published in `sha256sum.txt.asc`.
 /// Verifying that file's *GPG signature* against Syncthing's release key is a
