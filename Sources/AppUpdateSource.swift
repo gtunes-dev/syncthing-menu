@@ -30,8 +30,15 @@ final class AppUpdateSource: UpdateSource {
                                                   userDriverDelegate: bridge)
         // We drive cadence ourselves. Downloads happen in the background while running,
         // so applying an update is a local install + relaunch with no network at quit.
+        // automaticallyDownloadsUpdates only sticks because Info.plist sets
+        // SUAllowsAutomaticUpdates: with automaticallyChecksForUpdates off, Sparkle
+        // otherwise derives its allows-automatic-updates gate from that setting and
+        // silently ignores this setter (which is what sent the 0.1.3→0.1.4 update
+        // through the interactive alert instead of the silent path).
         controller.updater.automaticallyChecksForUpdates = false
         controller.updater.automaticallyDownloadsUpdates = true
+        NSLog("[Updates] Sparkle config: allowsAutomaticUpdates=%d automaticallyDownloadsUpdates=%d",
+              controller.updater.allowsAutomaticUpdates, controller.updater.automaticallyDownloadsUpdates)
     }
 
     /// Debug builds never fight the production appcast: a dev build always reads the
@@ -60,9 +67,12 @@ final class AppUpdateSource: UpdateSource {
 
     /// Silent probe: discovers whether an update exists, with no download and no UI.
     override func checkForUpdate() async throws -> UpdateState {
-        // Fail fast if Sparkle can't start a session — `checkForUpdateInformation()`
+        // Fail fast if a session is already running — `checkForUpdateInformation()`
         // silently does nothing in that state, which would leak the continuation.
-        guard controller.updater.canCheckForUpdates else {
+        // Guard on `sessionInProgress`, not `canCheckForUpdates`: Sparkle re-enables
+        // the latter while a session is parked showing an update (so a user-initiated
+        // check can refocus it), which let a probe slip through on 2026-07-07.
+        guard !controller.updater.sessionInProgress else {
             throw SparkleMechanismError.sessionAlreadyInProgress
         }
         return try await withCheckedThrowingContinuation { continuation in
@@ -74,15 +84,31 @@ final class AppUpdateSource: UpdateSource {
     /// Download in the background, then install and relaunch with no UI. Sparkle routes
     /// a background-downloaded update through `willInstallUpdateOnQuit`; we take control
     /// and invoke its install handler immediately.
+    ///
+    /// Last resort: when Sparkle refuses to stage silently (`requiresUserAttention` —
+    /// e.g. installing this copy would need admin authorization), the silent install
+    /// fails, and we hand the parked session to Sparkle's own dialog brought to the
+    /// front — the Update click that got us here is the consent to show it. The user
+    /// completes or cancels the update there; either way the session ends and the
+    /// channel is usable again.
     override func applyUpdate() async throws {
-        guard controller.updater.canCheckForUpdates else {
+        guard !controller.updater.sessionInProgress else {
             throw SparkleMechanismError.sessionAlreadyInProgress
         }
-        let install: () -> Void = try await withCheckedThrowingContinuation { continuation in
-            bridge.pendingInstall = continuation
-            controller.updater.checkForUpdatesInBackground()
+        do {
+            let install: () -> Void = try await withCheckedThrowingContinuation { continuation in
+                bridge.pendingInstall = continuation
+                controller.updater.checkForUpdatesInBackground()
+            }
+            install()
+        } catch SparkleMechanismError.requiresUserAttention {
+            // The session is parked on the update whose alert we suppressed in
+            // `standardUserDriverShouldHandleShowingScheduledUpdate`. A user-initiated
+            // check is Sparkle's documented hand-off: it refocuses that pending update,
+            // activating the app and presenting its dialog front and center.
+            controller.updater.checkForUpdates()
+            throw SparkleMechanismError.requiresUserAttention
         }
-        install()
     }
 }
 
@@ -145,13 +171,23 @@ private final class SparkleBridge: NSObject, SPUUpdaterDelegate, SPUStandardUser
         resolveInstall(.failure(failure))
     }
 
+    // Never let Sparkle present its own alert for a scheduled (background) update:
+    // for a background app with a key window it deliberately orders that alert BEHIND
+    // all windows (`orderBack:`), leaving an orphaned dialog lurking there — observed
+    // behind the Settings window on the 0.1.3→0.1.4 update. Returning false makes
+    // Sparkle notify `standardUserDriverWillHandleShowingUpdate` instead, below.
+    func standardUserDriverShouldHandleShowingScheduledUpdate(_ update: SUAppcastItem,
+                                                              andInImmediateFocus immediateFocus: Bool) -> Bool {
+        false
+    }
+
     // Sparkle decided the update needs user interaction (it can't stage silently) and
-    // is about to route it to its standard UI. Our install path is strictly no-UI, so
-    // fail the pending install rather than park behind an alert that may never present
-    // (an inactive LSUIElement agent doesn't show background-update alerts). The
-    // session itself continues toward Sparkle's UI; a check landing while it lingers
-    // fails fast via the `canCheckForUpdates` guard. In the silent-success path this
-    // fires, if at all, only after `willInstallUpdateOnQuit` — the pending is nil then.
+    // would route it to its standard UI — suppressed above, so it lands here instead.
+    // Fail the pending install: the silent path is over, and `applyUpdate()`'s catch
+    // hands the parked session to Sparkle's dialog in front. A check landing while
+    // that session lingers fails fast via the `sessionInProgress` guard. In the
+    // silent-success path this fires, if at all, only after `willInstallUpdateOnQuit`
+    // — the pending is nil then.
     func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool,
                                                    forUpdate update: SUAppcastItem,
                                                    state: SPUUserUpdateState) {

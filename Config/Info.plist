@@ -38,6 +38,13 @@
 	     SUEnableAutomaticChecks here suppresses Sparkle's own first-run prompt. -->
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
+	<!-- Required for the silent install path. We turn automaticallyChecksForUpdates
+	     off at runtime (we drive check cadence ourselves); without this key Sparkle
+	     derives its allows-automatic-updates gate FROM that setting and silently
+	     ignores automaticallyDownloadsUpdates = true, routing every install through
+	     its interactive update alert instead of background download + silent install. -->
+	<key>SUAllowsAutomaticUpdates</key>
+	<true/>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 </dict>
