@@ -74,12 +74,30 @@ final class SyncthingUpdateSource: UpdateSource {
         (try? await api?.systemVersion()).map(Self.displayVersion)
     }
 
+    /// Availability is determined client-side (`SyncthingReleases`): the daemon
+    /// runs with `STNOUPGRADE=1` (no Web UI upgrade banner, no self-upgrades),
+    /// which also disables its `GET /rest/system/upgrade`. We fetch the daemon's
+    /// own `releasesURL` feed and apply its selection rules, so this check and
+    /// the daemon-side `POST` install keep resolving the same release.
     override func checkForUpdate() async throws -> UpdateState {
         guard let api else { throw SyncthingAPI.APIError.badURL }
-        let info = try await api.upgradeInfo()
-        if info.majorNewer { return .available(version: Self.displayVersion(info.latest), isMajor: true) }
-        if info.newer { return .available(version: Self.displayVersion(info.latest), isMajor: false) }
-        return .upToDate
+        let running = try await api.systemVersionInfo()
+        let options = try await api.upgradeCheckOptions()
+        guard let feedURL = URL(string: options.releasesURL) else {
+            throw SyncthingAPI.APIError.badURL
+        }
+        let releases = try await SyncthingReleases.fetchReleases(from: feedURL)
+        let latest = try SyncthingReleases.selectLatestRelease(
+            releases, current: running.version,
+            upgradeToPreReleases: options.upgradeToPreReleases, arch: running.arch)
+        switch SyncthingReleases.compareVersions(latest.tag, running.version) {
+        case .majorNewer:
+            return .available(version: Self.displayVersion(latest.tag), isMajor: true)
+        case .newer:
+            return .available(version: Self.displayVersion(latest.tag), isMajor: false)
+        default:
+            return .upToDate
+        }
     }
 
     override func applyUpdate() async throws {

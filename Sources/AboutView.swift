@@ -45,27 +45,35 @@ struct AboutView: View {
 
             Divider()
 
-            // ── Syncthing attribution (logo centered above the text) ──────────
-            VStack(spacing: 12) {
+            // ── Syncthing identity + attribution (mirrors the app section) ────
+            VStack(spacing: 10) {
+                // Sized to the app icon's VISIBLE art, not its frame: the system
+                // renders app icons with the macOS icon-grid inset (61 pt of art in
+                // the 76 pt frame above, measured), while the Syncthing logo is a
+                // full-bleed circle. The outer 76 pt slot keeps both sections'
+                // vertical rhythm identical; the inner frame equalizes optical size.
                 Image("SyncthingLogo")
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 28, height: 28)
+                    .frame(width: 62, height: 62)
+                    .frame(width: 76, height: 76)
+                Text("Syncthing")
+                    .font(.title2.weight(.bold))
                 if let version = syncthingVersion {
-                    VStack(spacing: 6) {
-                        Text("Syncthing \(version)")
-                            .font(.body)
-                            .foregroundStyle(.secondary)
-                        ReleaseNotesLink(url: ReleaseNotes.syncthing(version: version))
-                    }
+                    Text("Version \(version)")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                    ReleaseNotesLink(url: ReleaseNotes.syncthing(version: version))
                 }
                 Text(syncthingAttribution)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 6)
             }
-            .padding(.vertical, 22)
+            .padding(.top, 26)
+            .padding(.bottom, 22)
             .padding(.horizontal, 24)
 
             Divider()

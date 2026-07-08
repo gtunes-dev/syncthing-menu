@@ -254,8 +254,15 @@ final class SyncthingProcess {
         argv.append(nil)
         defer { argv.forEach { free($0) } }
 
+        // STNOUPGRADE: the daemon must never advertise or perform upgrades on its
+        // own — Syncthing Menu owns that flow (check via SyncthingReleases, install
+        // via POST /rest/system/upgrade, then the re-root). The flag 501s the
+        // daemon's GET /rest/system/upgrade, which is what empties the Web UI's
+        // upgrade banner; the POST is unaffected (verified live on v2.1.1).
+        var environment = ProcessInfo.processInfo.environment
+        environment["STNOUPGRADE"] = "1"
         var envp: [UnsafeMutablePointer<CChar>?] =
-            ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") }
+            environment.map { strdup("\($0.key)=\($0.value)") }
         envp.append(nil)
         defer { envp.forEach { free($0) } }
 

@@ -15,30 +15,45 @@ struct SyncthingAPI {
 
     // MARK: System
 
-    /// `GET /rest/system/version` → the running version, e.g. "v2.1.1".
-    func systemVersion() async throws -> String {
-        struct Response: Decodable { let version: String }
+    /// The running build, from `GET /rest/system/version`: version tag ("v2.1.1")
+    /// and architecture (Go's `runtime.GOARCH`, e.g. "arm64" — which slice of the
+    /// universal binary is running, needed to pick the right release asset).
+    struct SystemVersion: Decodable, Equatable {
+        let version: String
+        let arch: String
+    }
+
+    func systemVersionInfo() async throws -> SystemVersion {
         let data = try await send("/rest/system/version", method: "GET")
-        return try JSONDecoder().decode(Response.self, from: data).version
+        return try JSONDecoder().decode(SystemVersion.self, from: data)
     }
 
-    /// `GET /rest/system/upgrade` → upgrade availability. `newer` and `majorNewer`
-    /// are mutually exclusive: Syncthing surfaces a pending minor before a major, so
-    /// `majorNewer` only becomes true once no minor upgrade is pending.
-    struct UpgradeInfo: Decodable, Equatable {
-        let running: String
-        let latest: String
-        let newer: Bool
-        let majorNewer: Bool
+    /// The running version tag alone, e.g. "v2.1.1".
+    func systemVersion() async throws -> String {
+        try await systemVersionInfo().version
     }
 
-    func upgradeInfo() async throws -> UpgradeInfo {
-        let data = try await send("/rest/system/upgrade", method: "GET")
-        return try JSONDecoder().decode(UpgradeInfo.self, from: data)
+    /// The daemon options the client-side upgrade check mirrors: which releases
+    /// feed the daemon would install from, and whether prereleases count. Reading
+    /// them from the daemon keeps our check and its `POST /rest/system/upgrade`
+    /// resolving releases from identical inputs. (The daemon's own
+    /// `GET /rest/system/upgrade` is disabled by `STNOUPGRADE` — see
+    /// `SyncthingReleases`.)
+    struct UpgradeCheckOptions: Decodable, Equatable {
+        let releasesURL: String
+        let upgradeToPreReleases: Bool
+    }
+
+    func upgradeCheckOptions() async throws -> UpgradeCheckOptions {
+        let data = try await send("/rest/config/options", method: "GET")
+        return try JSONDecoder().decode(UpgradeCheckOptions.self, from: data)
     }
 
     /// `POST /rest/system/upgrade` → upgrade to the latest available version and
     /// restart. Used only on explicit user consent (majors are always gated).
+    /// Still served with `STNOUPGRADE` set (only the GET checks that flag —
+    /// verified live on v2.1.1); if a future daemon closes that asymmetry this
+    /// throws `.http(501)` and the install fails visibly.
     func performUpgrade() async throws {
         _ = try await send("/rest/system/upgrade", method: "POST")
     }
