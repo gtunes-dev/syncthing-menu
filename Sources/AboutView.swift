@@ -5,7 +5,8 @@ import AppKit
 /// attribution in the middle, then this app's license, project link, and
 /// copyright — three regions separated by horizontal rules.
 struct AboutView: View {
-    /// The running Syncthing daemon version (already prefixed with "v"), or nil
+    /// The running Syncthing daemon version (bare semver, e.g. "2.1.1" — the
+    /// API's "v" prefix is stripped at the update-source boundary), or nil
     /// when the daemon isn't running.
     let syncthingVersion: String?
 

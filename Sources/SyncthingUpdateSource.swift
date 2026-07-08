@@ -61,21 +61,31 @@ final class SyncthingUpdateSource: UpdateSource {
 
     // MARK: - Mechanism
 
+    /// The daemon's API reports Git-tag-style versions ("v2.1.1"). The "v" is
+    /// tag orthography, not part of the version — strip it at this boundary so
+    /// every UI surface shows bare semver, matching the app's own
+    /// CFBundleShortVersionString convention. (`ReleaseNotes` re-normalizes
+    /// when building tag URLs, so links are unaffected.)
+    private static func displayVersion(_ raw: String) -> String {
+        String(raw.drop(while: { $0 == "v" || $0 == "V" }))
+    }
+
     override func fetchVersion() async -> String? {
-        try? await api?.systemVersion()
+        (try? await api?.systemVersion()).map(Self.displayVersion)
     }
 
     override func checkForUpdate() async throws -> UpdateState {
         guard let api else { throw SyncthingAPI.APIError.badURL }
         let info = try await api.upgradeInfo()
-        if info.majorNewer { return .available(version: info.latest, isMajor: true) }
-        if info.newer { return .available(version: info.latest, isMajor: false) }
+        if info.majorNewer { return .available(version: Self.displayVersion(info.latest), isMajor: true) }
+        if info.newer { return .available(version: Self.displayVersion(info.latest), isMajor: false) }
         return .upToDate
     }
 
     override func applyUpdate() async throws {
         guard let api else { throw SyncthingAPI.APIError.badURL }
-        let from = currentVersion
+        // Raw-to-raw comparison, independent of the display normalization.
+        let from = try? await api.systemVersion()
         // The daemon downloads + SHA-verifies the new binary, renames the running
         // `syncthing` to `syncthing.old`, writes the new one, and restarts its worker
         // (its monitor keeps our process alive). Wait for it to come up on the new
