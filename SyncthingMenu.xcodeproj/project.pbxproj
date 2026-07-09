@@ -189,7 +189,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "io.github.gtunes-dev.SyncthingMenu";
 				PRODUCT_NAME = "Syncthing Menu";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -212,7 +212,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "io.github.gtunes-dev.SyncthingMenu";
 				PRODUCT_NAME = "Syncthing Menu";
 				SWIFT_EMIT_LOC_STRINGS = YES;
