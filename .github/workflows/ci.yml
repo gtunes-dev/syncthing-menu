@@ -35,6 +35,12 @@ jobs:
           if [ -n "$XC" ]; then sudo xcode-select -s "$XC"; fi
           xcodebuild -version
 
+      - name: Clear SwiftPM artifact cache
+        # SwiftPM wedges on a partially-downloaded binary artifact ("... already
+        # exists in file system" for Sparkle's zip, seen 2026-07-09); a stale
+        # cache on the runner is never worth keeping. Start clean.
+        run: rm -rf ~/Library/Caches/org.swift.swiftpm/artifacts
+
       - name: Build
         run: |
           xcodebuild \
