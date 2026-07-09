@@ -100,7 +100,10 @@ final class SyncthingUpdateSource: UpdateSource {
         }
     }
 
-    override func applyUpdate() async throws {
+    /// Same mechanism for user-initiated and automatic installs: there is no
+    /// per-update consent UI on this channel (the click is the consent; release
+    /// notes live on the card), so `userInitiated` is unused.
+    override func applyUpdate(userInitiated: Bool) async throws {
         guard let api else { throw SyncthingAPI.APIError.badURL }
         // Raw-to-raw comparison, independent of the display normalization.
         let from = try? await api.systemVersion()

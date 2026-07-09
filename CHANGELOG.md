@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Clicking Update for a Syncthing Menu update now opens Sparkle's standard update window — always in the foreground, never hidden behind other windows — where the release notes can be reviewed before choosing to install. "Skip This Version" (or just closing the window) returns to Settings with the update still offered, so the decision can be revisited at any time. The window carries only that decision: Sparkle's own "automatically download and install updates" checkbox is not shown — the checkbox in Settings remains the single control for automatic installs. Automatic installs themselves remain fully silent, and the app keeps checking for newer releases while an update is pending, so the newest version is always the one offered.
+
 ## [0.1.6] - 2026-07-08
 
 ### Changed

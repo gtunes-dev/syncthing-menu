@@ -18,6 +18,12 @@ enum UpdateState: Equatable {
     var isInstalling: Bool { if case .installing = self { return true } else { return false } }
 }
 
+/// Thrown by a mechanism's `applyUpdate(userInitiated:)` when the user declined
+/// the offered update (dismissed or skipped its consent UI). Not a failure: the
+/// policy layer restores the prior `.available` state, so the update stays
+/// offered and the Update button works again immediately.
+struct UpdateDeclinedError: Error {}
+
 /// Serializes installs across every channel: at most one update — the app or
 /// Syncthing — is ever being applied at a time, so a Sparkle relaunch can never land
 /// mid-daemon-upgrade (or vice versa). Main-thread confined like all update policy,
@@ -172,24 +178,32 @@ class UpdateSource: ObservableObject {
         runCheck()
     }
 
-    /// Apply the available update — from the Update button, or an eligible auto-install.
-    /// Installs are serialized app-wide: if another channel is mid-install this defers
-    /// (the state stays `.available`), and the coordinator's release re-evaluates it
-    /// for auto-install. The claim is held through `didApplyUpdate()` — deliberately
-    /// not through the daemon's post-upgrade re-root/reconnect, which is already safe
-    /// against a quit or relaunch (a fresh spawn *is* the re-root).
-    func installAvailable() {
+    /// Apply the available update — from the Update button or menu item
+    /// (`userInitiated: true`, the default) or an eligible auto-install (`false`).
+    /// The mechanism may present consent UI on the user-initiated path; a decline
+    /// (`UpdateDeclinedError`) restores the prior `.available` state, so the update
+    /// stays offered. Installs are serialized app-wide: if another channel is
+    /// mid-install this defers (the state stays `.available`), and the coordinator's
+    /// release re-evaluates it for auto-install. The claim is held through
+    /// `didApplyUpdate()` — deliberately not through the daemon's post-upgrade
+    /// re-root/reconnect, which is already safe against a quit or relaunch (a fresh
+    /// spawn *is* the re-root).
+    func installAvailable(userInitiated: Bool = true) {
         guard isAvailable, case .available = state else { return }
         guard coordinator.claim(self) else {
             NSLog("[Updates] %@: install deferred — another update is installing", name)
             return
         }
+        let offered = state
         state = .installing
         let token = epoch
         Task { @MainActor in
             defer { self.coordinator.release(self) }
             do {
-                try await self.applyUpdate()
+                try await self.applyUpdate(userInitiated: userInitiated)
+            } catch is UpdateDeclinedError {
+                if self.epoch == token { self.state = offered }
+                return
             } catch {
                 if self.epoch == token { self.state = .unknown }
                 return
@@ -223,7 +237,7 @@ class UpdateSource: ObservableObject {
             self.settings.lastChecked = Date()
             self.state = result
             if case let .available(_, isMajor) = result, self.shouldAutoInstall(isMajor: isMajor) {
-                self.installAvailable()
+                self.installAvailable(userInitiated: false)
             }
         }
     }
@@ -249,7 +263,7 @@ class UpdateSource: ObservableObject {
     /// finishes (releasing a deferred install).
     private func autoInstallIfEligible() {
         guard case let .available(_, isMajor) = state, shouldAutoInstall(isMajor: isMajor) else { return }
-        installAvailable()
+        installAvailable(userInitiated: false)
     }
 
     // MARK: - Polling
@@ -274,6 +288,10 @@ class UpdateSource: ObservableObject {
     // Contract: every mechanism call MUST complete — return or throw. The policy
     // layer's single-flight guards (`checkInFlight`, `.installing`, the coordinator's
     // claim) clear only on completion; a call that never resolves wedges the channel.
+    // One sanctioned exception: an `applyUpdate` whose success path ends in app
+    // termination (the app channel's install + relaunch) may stay pending until the
+    // process dies — holding the coordinator claim to the end is exactly what keeps
+    // the other channel from starting an install under a pending relaunch.
     // `@MainActor` makes the main confinement compiler-checked here (and matches
     // Sparkle's own isolation); the policy layer only calls these from main tasks.
 
@@ -283,8 +301,12 @@ class UpdateSource: ObservableObject {
     /// Query availability: `.upToDate`, or `.available(version:isMajor:)`.
     @MainActor func checkForUpdate() async throws -> UpdateState { .unknown }
 
-    /// Apply the available update.
-    @MainActor func applyUpdate() async throws {}
+    /// Apply the available update. Three outcomes: return (applied), throw
+    /// `UpdateDeclinedError` (user declined consent UI — the update stays offered),
+    /// or throw anything else (failure). `userInitiated` says whether a user action
+    /// (Update button/menu item) started this; a mechanism may present consent UI
+    /// only then.
+    @MainActor func applyUpdate(userInitiated: Bool) async throws {}
 
     /// Hook run after `applyUpdate()` succeeds (e.g. Syncthing re-roots its daemon).
     @MainActor func didApplyUpdate() {}

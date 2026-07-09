@@ -182,9 +182,11 @@ private struct UpdateStatusRow: View {
                     .foregroundStyle(Color.accentColor)
             }
         case .installing:
+            // "Updating…", not "Installing…": on the app channel this state also
+            // covers the consent dialog being open (nothing is installing yet).
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("Installing…").foregroundStyle(.secondary)
+                Text("Updating…").foregroundStyle(.secondary)
             }
         }
     }
