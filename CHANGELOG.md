@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-07-09
+
 ### Changed
 - Two menu items have shorter names: "Syncthing Menu Settings…" is now "Settings…", and "Open Syncthing Web UI" is now "Open Syncthing".
 
