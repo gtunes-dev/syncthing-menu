@@ -250,7 +250,7 @@ final class StatusItemController: NSObject {
 
         menu.addItem(.separator())
 
-        let settingsItem = menu.addItem(withTitle: "Syncthing Menu Settings…",
+        let settingsItem = menu.addItem(withTitle: "Settings…",
                                         action: #selector(openSettings), keyEquivalent: "")
         settingsItem.target = self
 
@@ -290,7 +290,7 @@ final class StatusItemController: NSObject {
         syncthingUpdate.isHidden = true
         syncthingUpdateItem = syncthingUpdate
 
-        let webUI = menu.addItem(withTitle: "Open Syncthing Web UI",
+        let webUI = menu.addItem(withTitle: "Open Syncthing",
                                  action: #selector(openWebUI), keyEquivalent: "")
         webUI.target = self
         webUIItem = webUI
