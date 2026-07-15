@@ -49,7 +49,7 @@ final class SyncthingUpdateSource: UpdateSource {
     /// every UI surface shows bare semver, matching the app's own
     /// CFBundleShortVersionString convention. (`ReleaseNotes` re-normalizes
     /// when building tag URLs, so links are unaffected.)
-    private static func displayVersion(_ raw: String) -> String {
+    static func displayVersion(_ raw: String) -> String {
         String(raw.drop(while: { $0 == "v" || $0 == "V" }))
     }
 

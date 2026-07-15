@@ -33,7 +33,7 @@ enum SyncthingReleases {
         }
     }
 
-    enum FeedError: Error {
+    enum FeedError: Error, Equatable {
         case http(Int)
         /// No release in the feed carries an asset for this OS/architecture.
         case noApplicableRelease
