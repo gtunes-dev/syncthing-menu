@@ -44,10 +44,32 @@ jobs:
       - name: Build & Test
         # Ad-hoc signing (identity "-"): the unit tests are hosted in the app
         # binary, so the app must actually be runnable — unlike a plain build.
+        # NSUnbufferedIO keeps xcodebuild's piped output in order; xcbeautify
+        # renders the readable console log, while the raw stream — os_log
+        # diagnostics included — goes to a file that is uploaded as an artifact
+        # if anything fails.
+        #
+        # xcbeautify is expected on the stock runner image (not installed by
+        # us). It's cosmetic, so if the image ever drops it the step must NOT
+        # fail — the guard below falls back to raw output with a visible
+        # warning annotation instead.
         run: |
-          xcodebuild \
+          set -o pipefail
+          render() { xcbeautify --renderer github-actions; }
+          if ! command -v xcbeautify >/dev/null; then
+            echo "::warning::xcbeautify is missing from the runner image — showing raw xcodebuild output"
+            render() { cat; }
+          fi
+          NSUnbufferedIO=YES xcodebuild \
             -project SyncthingMenu.xcodeproj \
             -scheme SyncthingMenu \
             -destination 'platform=macOS' \
             CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES \
-            test
+            test 2>&1 | tee xcodebuild-raw.log | render
+
+      - name: Upload raw build/test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-raw-log
+          path: xcodebuild-raw.log

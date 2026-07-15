@@ -11,6 +11,10 @@ cd "$(dirname "$0")/.."
 # TEST_RUNNER_OS_ACTIVITY_MODE=default to get them back.
 export TEST_RUNNER_OS_ACTIVITY_MODE="${TEST_RUNNER_OS_ACTIVITY_MODE:-disable}"
 
+# Line-buffer xcodebuild's output: piped (task terminal, CI), its stdout is
+# otherwise block-buffered and phase markers print out of order.
+export NSUnbufferedIO=YES
+
 xcodebuild \
   -project SyncthingMenu.xcodeproj \
   -scheme SyncthingMenu \
