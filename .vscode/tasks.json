@@ -20,6 +20,15 @@
       "problemMatcher": []
     },
     {
+      "label": "Test",
+      "detail": "Build and run the unit test suite (SyncthingMenuTests) via xcodebuild.",
+      "type": "shell",
+      "command": "\"${workspaceFolder}/Scripts/test.sh\"",
+      "group": { "kind": "test", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
+    },
+    {
       "label": "Clean",
       "detail": "Remove build/ (Debug app, archives, exports, zips) and clean Xcode's DerivedData intermediates for the project.",
       "type": "shell",

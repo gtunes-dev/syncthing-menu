@@ -30,6 +30,14 @@ final class SyncthingMonitor {
     /// snapshot change thereafter.
     var onChange: ((Snapshot) -> Void)?
 
+    /// Called on the main thread when the endpoint has stopped answering for
+    /// several consecutive attempts while the daemon supposedly runs. The monitor
+    /// is the session's canonical health probe (it's the always-on long-poll):
+    /// rather than retrying a possibly-dead endpoint forever, it escalates and
+    /// stops; the session re-discovers the endpoint and reconnects the monitor
+    /// when it verifies (see `DaemonSession.endpointSuspect`).
+    var onEndpointSuspect: (() -> Void)?
+
     /// Folder states that count as activity — including the queued "-waiting"
     /// states (folders scan/sync in turn; a waiting folder is part of an active
     /// run). Anything else (idle, error, …) clears the folder.
@@ -51,11 +59,10 @@ final class SyncthingMonitor {
     private var activeFolders = Set<String>()
     private var published: Snapshot?
 
-    /// Start monitoring the daemon at `baseURL`. Replaces any prior connection.
-    func connect(baseURL: String, apiKey: String) {
+    /// Start monitoring the daemon behind `api` (a session-verified endpoint).
+    /// Replaces any prior connection — safe to call on every session publish.
+    func connect(api: SyncthingAPI) {
         disconnect()
-        guard let url = URL(string: baseURL) else { return }
-        let api = SyncthingAPI(baseURL: url, apiKey: apiKey)
         task = Task { @MainActor in await self.run(api: api) }
     }
 
@@ -68,10 +75,20 @@ final class SyncthingMonitor {
         published = nil
     }
 
+    /// Consecutive stream failures tolerated (with a 2s pause each) before the
+    /// endpoint is reported suspect. Three keeps a routine worker restart (a
+    /// couple of seconds, e.g. mid-upgrade) below the escalation threshold.
+    private static let failuresBeforeSuspect = 3
+
+    /// Sleeps between failed stream attempts. Injectable seam: tests exercise the
+    /// failure/escalation path without real time passing.
+    var retrySleep: (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) }
+
     @MainActor
     private func run(api: SyncthingAPI) async {
         var since = 0
         var needsSeed = true
+        var consecutiveFailures = 0
         while !Task.isCancelled {
             do {
                 if needsSeed {
@@ -87,6 +104,7 @@ final class SyncthingMonitor {
                 let events = try await api.events(since: since, types: Self.eventTypes,
                                                   timeout: Self.pollTimeout)
                 guard !Task.isCancelled else { return }
+                consecutiveFailures = 0
                 for event in events {
                     since = max(since, event.id)
                     try await apply(event, api: api)
@@ -97,10 +115,19 @@ final class SyncthingMonitor {
                 // Daemon unreachable (restarting, mid-upgrade) or a decode
                 // hiccup: back off, then rebuild from scratch — event IDs
                 // reset when the worker restarts, so keeping a stale `since`
-                // could go silent forever.
+                // could go silent forever. If it stays dark, the endpoint
+                // itself is suspect (port/key rotation): escalate to the
+                // session and stop — it reconnects us against the endpoint
+                // it re-verifies.
+                consecutiveFailures += 1
+                if consecutiveFailures >= Self.failuresBeforeSuspect {
+                    NSLog("[Monitor] endpoint suspect after \(consecutiveFailures) failures — escalating")
+                    onEndpointSuspect?()
+                    return
+                }
                 since = 0
                 needsSeed = true
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                await retrySleep(2_000_000_000)
             }
         }
     }

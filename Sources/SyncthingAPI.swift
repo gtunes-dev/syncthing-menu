@@ -4,7 +4,9 @@ import Foundation
 /// authenticates with the daemon's API key via the `X-API-Key` header.
 ///
 /// Endpoints and response shapes here are verified against a live v2.1.1 daemon.
-struct SyncthingAPI {
+/// Equatable by endpoint identity (base URL + key) — the session layer uses this
+/// to tell a real endpoint change from a republish of the same one.
+struct SyncthingAPI: Equatable {
     let baseURL: URL    // e.g. http://127.0.0.1:60533
     let apiKey: String
 

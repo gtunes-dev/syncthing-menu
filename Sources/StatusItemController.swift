@@ -103,6 +103,14 @@ final class StatusItemController: NSObject {
         refreshIcon()
     }
 
+    /// The session's verified endpoint URL. Fresher than the launch-time URL in
+    /// `update(daemonState:)` when the GUI address drifted mid-run (concrete-config
+    /// case); the session publish always follows the daemon-state push, so this
+    /// value wins while running.
+    func update(webUIURL: String?) {
+        self.webUIURL = webUIURL
+    }
+
     private func setDaemonVerbs(visible: Bool, canStart: Bool) {
         for item in [webUIItem, foldersItem, rescanItem, pauseToggleItem] {
             item?.isHidden = !visible

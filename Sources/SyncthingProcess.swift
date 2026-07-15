@@ -33,6 +33,10 @@ final class SyncthingProcess {
     private var stdoutHandle: FileHandle?
     private var exitSource: DispatchSourceProcess?
     private var guiURL: String?     // the running worker's REST base, for graceful shutdown
+    /// Whether this run pinned the GUI address via `--gui-address` (the dynamic-config
+    /// case). The CLI override outlives any config edit, so the address cannot drift
+    /// mid-run; only the API key can. See `refreshEndpoint()`.
+    private var usedGUIAddressOverride = false
 
     /// Latched `true` by `stop()` — the supervisor is terminating and must never
     /// (re)launch the daemon again. This is the single lifecycle guard: `start()`,
@@ -203,6 +207,37 @@ final class SyncthingProcess {
         }
     }
 
+    // MARK: - Live endpoint (the session's discovery source)
+
+    struct Endpoint: Equatable {
+        let guiURL: String
+        let apiKey: String?
+    }
+
+    /// Re-read the running daemon's REST endpoint from `config.xml`, for the
+    /// session's connect/reconnect. The asymmetry is deliberate:
+    ///
+    /// - The **API key** always comes fresh from the file — a Web-UI key rotation
+    ///   lands there immediately and applies to the live listener.
+    /// - The **address** is fixed for this run when we pinned it via
+    ///   `--gui-address` (the CLI override outlives any config edit), and re-read
+    ///   otherwise — in the concrete-config case a Web-UI address change actually
+    ///   moves the live listener.
+    ///
+    /// Also refreshes the values the graceful-stop ladder uses, so a REST shutdown
+    /// after a key rotation doesn't knock with the stale key. Returns nil when the
+    /// daemon isn't running.
+    func refreshEndpoint() throws -> Endpoint? {
+        guard let launchedURL = guiURL else { return nil }
+        let configURL = homeURL.appendingPathComponent("config.xml")
+        let config = try SyncthingConfig(contentsOf: configURL)
+        let address = usedGUIAddressOverride ? launchedURL
+                                             : (config.concreteGUIURL ?? launchedURL)
+        apiKey = config.apiKey
+        guiURL = address
+        return Endpoint(guiURL: address, apiKey: config.apiKey)
+    }
+
     private func runGenerate() throws {
         let proc = Process()
         proc.executableURL = binaryURL
@@ -310,6 +345,7 @@ final class SyncthingProcess {
 
         apiKey = plan.apiKey
         guiURL = plan.guiURL
+        usedGUIAddressOverride = plan.guiAddressOverride != nil
         state = .running(guiURL: plan.guiURL)
         NSLog("Syncthing daemon started at \(plan.guiURL) (home: \(homeURL.path))")
     }

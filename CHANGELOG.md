@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- An automated test suite, run locally and in CI on every push. The first tests cover the new reconnect behavior and the live-state monitor — endpoint discovery, API-key rotation, address moves, transient failures, and escalation — exercised against an in-process fake of Syncthing's REST API on a real local socket.
+
+### Changed
+- The app now reconnects to Syncthing automatically if its REST endpoint changes while running — for example, regenerating the API key (or moving the GUI address) in Syncthing's own settings no longer breaks the menu, the live status, or update checks until the next relaunch. The connection is re-verified and re-established within seconds, from Syncthing's own configuration.
+
 ## [0.1.8] - 2026-07-09
 
 ### Changed

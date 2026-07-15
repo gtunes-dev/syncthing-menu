@@ -11,9 +11,6 @@ final class SyncthingUpdateSource: UpdateSource {
     var onUpgradeApplied: (() -> Void)?
 
     private var api: SyncthingAPI?
-    /// Bumped on every connect/disconnect so an in-flight readiness wait can detect it
-    /// has been superseded.
-    private var connectionToken = 0
 
     /// Upper bound (seconds) on waiting for a self-upgrade to settle — the daemon
     /// downloads the new binary from upgrades.syncthing.net, swaps it, and restarts its
@@ -31,32 +28,18 @@ final class SyncthingUpdateSource: UpdateSource {
 
     // MARK: - Daemon lifecycle
 
-    /// The daemon is running and reachable. Wait for its REST API, enforce our
-    /// no-self-upgrade invariant, then begin the update policy.
-    func connect(baseURL: String, apiKey: String) {
-        guard let url = URL(string: baseURL) else { return }
-        connectionToken &+= 1
-        let token = connectionToken
-        let api = SyncthingAPI(baseURL: url, apiKey: apiKey)
+    /// Session hand-off: a non-nil API is a session-verified endpoint (the session
+    /// owns readiness polling and the autoUpgradeIntervalH=0 invariant), so
+    /// availability tracks it directly. Called only on real identity changes and
+    /// process-level transitions — NOT on transient `.connecting` blips, so an
+    /// in-flight install's settle-wait keeps its epoch across a worker restart.
+    func sessionChanged(api: SyncthingAPI?) {
         self.api = api
-        Task { @MainActor in
-            // Poll until the daemon answers (up to ~30s), bailing if superseded.
-            for _ in 0..<60 {
-                guard self.connectionToken == token else { return }
-                if (try? await api.systemVersion()) != nil { break }
-                try? await Task.sleep(nanoseconds: 500_000_000)
-            }
-            guard self.connectionToken == token else { return }
-            try? await api.setAutoUpgradeIntervalH(0)
-            self.makeAvailable()
+        if api != nil {
+            makeAvailable()
+        } else {
+            makeUnavailable()
         }
-    }
-
-    /// The daemon stopped or became unreachable.
-    func disconnect() {
-        connectionToken &+= 1
-        api = nil
-        makeUnavailable()
     }
 
     // MARK: - Mechanism

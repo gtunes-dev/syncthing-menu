@@ -7,11 +7,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: StatusItemController?
     private var settingsWindowController: SettingsWindowController?
     private var aboutWindowController: AboutWindowController?
-    /// The running daemon's GUI URL (for ad-hoc REST calls like the folder list).
-    private var currentGUIURL: String?
     private let loginItem = LoginItemController()
     private let releaseUpdater = ReleaseUpdater()
     private let syncthingProcess = SyncthingProcess()
+    /// The session layer: turns process lifecycle + endpoint reachability into a
+    /// verified `SyncthingAPI` (or nothing). All REST consumers hang off this.
+    private lazy var daemonSession = DaemonSession(endpoints: syncthingProcess)
+    /// The API the consumers were last handed — session republishes after a blip
+    /// recovery carry the same identity, and only real changes propagate.
+    private var lastPublishedAPI: SyncthingAPI?
     /// Live daemon-state feed (pause/sync activity) over the events API — the
     /// single source of truth for daemon-side state while it runs.
     private let syncthingMonitor = SyncthingMonitor()
@@ -23,6 +27,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let syncthingUpdateSource = SyncthingUpdateSource(settings: Settings.shared.syncthing)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Under the unit-test runner the app is only a test host: skip real startup
+        // (status item, Sparkle, daemon bootstrap) — tests build their own fixtures.
+        let env = ProcessInfo.processInfo.environment
+        if env["XCTestConfigurationFilePath"] != nil || env["XCTestSessionIdentifier"] != nil {
+            return
+        }
+
         let settingsController = SettingsWindowController(
             settings: .shared,
             appSource: appUpdateSource,
@@ -48,25 +59,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.onUpdateSyncthing = { [weak self] in self?.syncthingUpdateSource.installAvailable() }
         statusItemController = controller
 
-        // Reflect the daemon's live state in the menu, and connect/disconnect the
-        // Syncthing update source + state monitor as the daemon comes up / goes down.
+        // Reflect the daemon's live state in the menu; the session turns lifecycle
+        // into a verified endpoint for every REST consumer (supervision model:
+        // Process → Session → consumers, design.md § Process & session supervision).
         syncthingProcess.onStateChange = { [weak self] state in
             guard let self else { return }
             self.statusItemController?.update(daemonState: state)
-            switch state {
-            case let .running(guiURL):
-                self.currentGUIURL = guiURL
-                if let key = self.syncthingProcess.apiKey {
-                    self.syncthingUpdateSource.connect(baseURL: guiURL, apiKey: key)
-                    self.syncthingMonitor.connect(baseURL: guiURL, apiKey: key)
+            self.daemonSession.processStateChanged(state)
+        }
+
+        daemonSession.onChange = { [weak self] sessionState in
+            guard let self else { return }
+            switch sessionState {
+            case let .connected(api):
+                // The monitor reconnects on EVERY publish (its poll task ended if
+                // it escalated; reseeding is cheap). The update source only sees
+                // real identity changes, so a blip recovery on the same endpoint
+                // doesn't reset an in-flight install or re-trigger checks.
+                self.syncthingMonitor.connect(api: api)
+                if api != self.lastPublishedAPI {
+                    self.lastPublishedAPI = api
+                    self.syncthingUpdateSource.sessionChanged(api: api)
+                    self.statusItemController?.update(webUIURL: api.baseURL.absoluteString)
                 }
                 self.refreshFolders()
-            case .stopped, .starting, .failed:
-                self.currentGUIURL = nil
-                self.syncthingUpdateSource.disconnect()
+            case .unavailable:
+                self.lastPublishedAPI = nil
                 self.syncthingMonitor.disconnect()
+                self.syncthingUpdateSource.sessionChanged(api: nil)
                 self.statusItemController?.update(folders: [])
+            case .connecting:
+                // Transient (startup discovery or post-suspicion re-verify):
+                // consumers keep what they have until it resolves.
+                break
             }
+        }
+
+        // The monitor doubles as the session's health probe: persistent long-poll
+        // failure means the endpoint moved or died — let the session reconcile.
+        syncthingMonitor.onEndpointSuspect = { [weak self] in
+            self?.daemonSession.endpointSuspect()
         }
 
         // The monitor's snapshot drives the icon's Paused/Syncing marks, the
@@ -131,11 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// A REST client for the running daemon, or nil when it isn't reachable.
-    private var currentAPI: SyncthingAPI? {
-        guard let urlString = currentGUIURL, let url = URL(string: urlString),
-              let key = syncthingProcess.apiKey else { return nil }
-        return SyncthingAPI(baseURL: url, apiKey: key)
-    }
+    private var currentAPI: SyncthingAPI? { daemonSession.api }
 
     /// Fetch the daemon's configured folders and push them to the menu. Leaves the
     /// current list untouched on a transient failure; clears it when the daemon

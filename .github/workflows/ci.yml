@@ -17,11 +17,11 @@ on:
       - 'design/**'
       - 'docs/**'
 
-# Unsigned build for fast PR validation. No secrets required — signing and
-# notarization happen only in the release workflow.
+# Ad-hoc-signed build + unit tests for fast PR validation. No secrets required —
+# Developer ID signing and notarization happen only in the release workflow.
 jobs:
   build:
-    name: Build (unsigned)
+    name: Build & Test
     runs-on: macos-15
     steps:
       - name: Checkout
@@ -41,11 +41,13 @@ jobs:
         # cache on the runner is never worth keeping. Start clean.
         run: rm -rf ~/Library/Caches/org.swift.swiftpm/artifacts
 
-      - name: Build
+      - name: Build & Test
+        # Ad-hoc signing (identity "-"): the unit tests are hosted in the app
+        # binary, so the app must actually be runnable — unlike a plain build.
         run: |
           xcodebuild \
             -project SyncthingMenu.xcodeproj \
-            -target SyncthingMenu \
-            -configuration Debug \
-            CODE_SIGNING_ALLOWED=NO \
-            build
+            -scheme SyncthingMenu \
+            -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES \
+            test
