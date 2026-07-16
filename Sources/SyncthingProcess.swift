@@ -48,6 +48,11 @@ final class SyncthingProcess {
     /// Where we persist *our* chosen GUI port (not in Syncthing's config).
     private static let guiPortDefaultsKey = "syncthing.managedGUIPort"
 
+    /// How long each rung of the stop ladder (REST → SIGTERM → SIGKILL) waits
+    /// before escalating. Injectable seam: the process tests run the ladder
+    /// without real multi-second waits.
+    var escalationGrace: TimeInterval = 3
+
     init(binaryURL: URL = ReleaseUpdater.installedBinaryURL,
          homeURL: URL = SyncthingProcess.defaultHomeURL) {
         self.binaryURL = binaryURL
@@ -136,17 +141,17 @@ final class SyncthingProcess {
         let start = Date()
         func elapsed() -> String { String(format: "%.1fs", Date().timeIntervalSince(start)) }
 
-        if waitForExit(pid, 3) {
+        if waitForExit(pid, escalationGrace) {
             NSLog("[syncthing] stopped via REST shutdown (\(elapsed()))")
             return
         }
-        NSLog("[syncthing] REST shutdown didn't complete in 3s — falling back to SIGTERM")
+        NSLog("[syncthing] REST shutdown didn't complete in \(escalationGrace)s — falling back to SIGTERM")
         kill(pid, SIGTERM)
-        if waitForExit(pid, 3) {
+        if waitForExit(pid, escalationGrace) {
             NSLog("[syncthing] stopped via SIGTERM (\(elapsed()))")
             return
         }
-        NSLog("[syncthing] SIGTERM didn't complete in 3s — sending SIGKILL")
+        NSLog("[syncthing] SIGTERM didn't complete in \(escalationGrace)s — sending SIGKILL")
         kill(pid, SIGKILL)
         _ = waitForExit(pid, 2)
         NSLog("[syncthing] stopped via SIGKILL (\(elapsed()))")
@@ -335,7 +340,8 @@ final class SyncthingProcess {
             self.stdoutHandle?.readabilityHandler = nil
             self.stdoutHandle = nil
             if !self.isTerminating {
-                // TODO: restart with backoff on unexpected exit.
+                // Surface the exit; deliberately no auto-restart (worker crashes
+                // are already restarted by Syncthing's own monitor process).
                 self.state = .failed("Syncthing exited (\(Self.describe(status)))")
             }
         }
