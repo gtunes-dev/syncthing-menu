@@ -47,9 +47,10 @@ update.
   no Dock icon, minimal idle footprint.
 - **Daemon fetched at runtime, not bundled.** On first launch the app downloads
   the official, Apple-signed, universal Syncthing binary from Syncthing's GitHub
-  Releases into `~/Library/Application Support/Syncthing Menu/`, verifying its
-  SHA-256. No Go toolchain is ever needed, and the daemon's Go version is exactly
-  what upstream shipped.
+  Releases into `~/Library/Application Support/Syncthing Menu/`. The download's
+  SHA-256 is checked, and the binary's Apple Developer ID signature — Syncthing's
+  own — is verified at installation and again before every launch. No Go
+  toolchain is ever needed, and the daemon is exactly what upstream shipped.
 - **The app owns daemon updates.** Syncthing's autonomous self-upgrade timer is
   disabled; instead the app checks for new releases and applies them on your
   terms (see **Updates** below). Minor updates can install automatically; major
@@ -61,15 +62,23 @@ update.
 
 Click the menu-bar icon for:
 
-- **Syncthing status** — running, starting, stopped, or an error.
-- **Open Web UI…** — opens Syncthing's full web interface in your browser.
-- **Settings…** — update preferences for both Syncthing and the app, plus Full
-  Disk Access setup.
+- **Live status** — a colored dot and a one-line state: running, syncing,
+  paused, starting, stopped, failed, or needing attention (a folder Syncthing
+  can't access).
+- **Open Syncthing** — Syncthing's full web interface in your browser.
+- **Folders** — your sync folders; click one to open it in Finder.
+- **Rescan All** and **Pause All Devices ⇄ Resume All Devices**.
+- **Start Syncthing** — appears when the daemon is stopped or has failed.
+- **Update … to X** — a direct install action per channel, appearing only while
+  that update is pending.
+- **Settings…** — update preferences for both channels, Open at login, and Full
+  Disk Access setup. Carries a caution badge when a folder needs attention.
 - **Quit** — stops the daemon cleanly, then exits.
 
 The menu-bar icon itself reflects state: a quiet monochrome mark when all is
-well, an error variant when the daemon can't run, and a badged variant when an
-update is available.
+well, distinct marks while syncing or paused, an alert mark when the daemon
+can't run or a folder needs attention, and a badged variant when an update is
+available. Its tooltip always carries the full one-line story.
 
 ## Permissions
 
@@ -150,6 +159,9 @@ Requires Xcode 16 or later.
 # Open in Xcode and run, or build unsigned from the CLI:
 xcodebuild -project SyncthingMenu.xcodeproj -target SyncthingMenu \
   -configuration Debug CODE_SIGNING_ALLOWED=NO build
+
+# Run the test suite:
+Scripts/test.sh
 ```
 
 To run a locally signed build from Xcode, set your team in the target's
@@ -160,22 +172,28 @@ To run a locally signed build from Xcode, set your team in the target's
 ```
 Sources/                 Swift sources + asset catalog (file-system-synchronized group)
   main.swift             Explicit entry point (NSApplication setup)
-  AppDelegate.swift      Lifecycle owner
+  AppDelegate.swift      Lifecycle owner and wiring
   StatusItemController.swift   Menu-bar item, menu, and state-driven icon
   SyncthingProcess.swift Daemon supervisor (spawn / graceful stop / restart)
+  DaemonSession.swift    Endpoint discovery + automatic reconnection
+  SyncthingMonitor.swift Live daemon state + folder health, over the events API
   SyncthingAPI.swift     Syncthing REST client
-  SyncthingConfig.swift  Daemon configuration (disables the self-upgrade timer)
-  ReleaseUpdater.swift   Daemon binary download + checksum verify
+  SyncthingConfig.swift  Reads the daemon's config.xml (never writes it)
+  ReleaseUpdater.swift   Daemon binary download + verification + install
+  BinaryVerifier.swift   Developer ID signature check, pinned to Syncthing's team
+  SyncthingReleases.swift  Client-side update check (port of Syncthing's own)
   UpdateState.swift      Shared update policy engine (UpdateSource) + install coordinator
   SyncthingUpdateSource.swift  Syncthing update channel (REST)
   AppUpdateSource.swift  App update channel (Sparkle, silent background install)
   ReleaseNotes*.swift    Release-notes URLs + link view
   Settings*.swift        Settings window + view
   FullDiskAccessSection.swift  FDA explainer + help sheet
+  Log.swift              Unified-log categories (one subsystem)
+Tests/                   Unit + integration tests (Swift Testing; run with Scripts/test.sh)
 Config/                  Info.plist + entitlements (referenced via build settings)
-Scripts/                 sign-and-notarize.sh, dev/render helpers
-.github/workflows/       ci.yml (unsigned build), release.yml
-SyncthingMenu.xcodeproj  App target
+Scripts/                 test.sh, sign-and-notarize.sh, dev/render helpers
+.github/workflows/       ci.yml (build + tests), release.yml
+SyncthingMenu.xcodeproj  App + test targets
 ```
 
 ## Distribution identity
