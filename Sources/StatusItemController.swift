@@ -46,12 +46,15 @@ final class StatusItemController: NSObject {
     private var appUpdateItem: NSMenuItem?
     private var syncthingUpdateItem: NSMenuItem?
     private var startItem: NSMenuItem?
+    private var settingsItem: NSMenuItem?
     private var webUIItem: NSMenuItem?
     private var foldersItem: NSMenuItem?
     private var rescanItem: NSMenuItem?
     private var pauseToggleItem: NSMenuItem?
     private var allDevicesPaused = false
     private var syncing = false
+    /// A folder Syncthing can't access (permission error) — needs the user.
+    private var folderAttention = false
     private var appUpdate: PendingUpdate?
     private var syncthingUpdate: PendingUpdate?
     /// The managed daemon's GUI URL when running; nil otherwise.
@@ -80,6 +83,7 @@ final class StatusItemController: NSObject {
     /// recovery action, Start Syncthing.
     func update(daemonState: SyncthingProcess.State) {
         self.daemonState = daemonState
+        refreshSettingsBadge()
         switch daemonState {
         case .stopped:
             setStatus(dot: .tertiaryLabelColor, detail: "Not running")
@@ -122,18 +126,53 @@ final class StatusItemController: NSObject {
     /// label, the status line, and the icon (Paused/Syncing marks). Fed by
     /// `SyncthingMonitor` over the daemon's push event stream, so it stays
     /// current without the menu being opened.
-    func update(allDevicesPaused: Bool, syncing: Bool) {
+    func update(allDevicesPaused: Bool, syncing: Bool, folderAttention: Bool) {
         self.allDevicesPaused = allDevicesPaused
         self.syncing = syncing
+        self.folderAttention = folderAttention
         pauseToggleItem?.title = allDevicesPaused ? "Resume All Devices" : "Pause All Devices"
+        refreshSettingsBadge()
         if case .running = daemonState { setRunningStatus() }
         refreshIcon()
     }
 
-    /// The running daemon's status line. Paused outranks Syncing: a pause is
-    /// the user's deliberate mode, and dominates transient scan activity.
+    /// A caution badge on Settings… while a folder is blocked on permissions:
+    /// the status line names the problem, the badge points at where the fix
+    /// lives (the FDA section there is in its alert state). Settings is an
+    /// app-section item, so the daemon section stays free of app verbs.
+    private func refreshSettingsBadge() {
+        let running = if case .running = daemonState { true } else { false }
+        settingsItem?.image = (running && folderAttention) ? Self.attentionBadge : nil
+    }
+
+    /// The same caution mark the Settings FDA section shows (orange
+    /// exclamationmark.triangle.fill), pre-rendered into a plain image: the
+    /// menu renderer doesn't draw color-configured symbol images (verified on
+    /// macOS 27), but has always honored ordinary bitmaps.
+    private static let attentionBadge: NSImage = {
+        guard let symbol = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
+                                   accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular)) else {
+            return NSImage()
+        }
+        let image = NSImage(size: symbol.size, flipped: false) { rect in
+            symbol.draw(in: rect)
+            NSColor.systemOrange.setFill()
+            rect.fill(using: .sourceAtop)   // tint the glyph, keep its alpha
+            return true
+        }
+        image.accessibilityDescription = "Needs attention"
+        return image
+    }()
+
+    /// The running daemon's status line. Attention (a folder Syncthing can't
+    /// access) outranks everything — it needs the user's action; Paused outranks
+    /// Syncing: a pause is the user's deliberate mode, and dominates transient
+    /// scan activity.
     private func setRunningStatus() {
-        if allDevicesPaused {
+        if folderAttention {
+            setStatus(dot: .systemOrange, detail: "Can't access some folders")
+        } else if allDevicesPaused {
             setStatus(dot: .systemOrange, detail: "Paused")
         } else if syncing {
             setStatus(dot: .systemGreen, detail: "Syncing…")
@@ -210,7 +249,11 @@ final class StatusItemController: NSObject {
         let dimmed: Bool
         switch daemonState {
         case .running:
-            base = allDevicesPaused ? "Paused" : (syncing ? "Syncing" : "Idle")
+            // Attention = the error mark even though the daemon runs: the
+            // condition needs the user, and the icon is the only always-visible
+            // surface. Below that, Paused (deliberate mode) outranks Syncing.
+            base = folderAttention ? "Error"
+                 : (allDevicesPaused ? "Paused" : (syncing ? "Syncing" : "Idle"))
             dimmed = false
         case .stopped, .starting: base = "Idle"; dimmed = true
         case .failed: base = "Error"; dimmed = false
@@ -234,8 +277,10 @@ final class StatusItemController: NSObject {
         case .stopped: state = "Syncthing is not running"
         case .starting: state = "Syncthing is starting"
         case .running:
-            state = allDevicesPaused ? "Syncthing is paused"
-                                     : (syncing ? "Syncthing is syncing" : "Syncthing is running")
+            state = folderAttention
+                ? "Syncthing can't access some folders — open Settings (Full Disk Access may be needed)"
+                : allDevicesPaused ? "Syncthing is paused"
+                                   : (syncing ? "Syncthing is syncing" : "Syncthing is running")
         case let .failed(message): state = "Syncthing failed — \(message)"
         }
         var parts = ["Syncthing Menu — \(state)"]
@@ -258,9 +303,10 @@ final class StatusItemController: NSObject {
 
         menu.addItem(.separator())
 
-        let settingsItem = menu.addItem(withTitle: "Settings…",
-                                        action: #selector(openSettings), keyEquivalent: "")
-        settingsItem.target = self
+        let settings = menu.addItem(withTitle: "Settings…",
+                                    action: #selector(openSettings), keyEquivalent: "")
+        settings.target = self
+        settingsItem = settings
 
         // Direct update action, shown only while an app update is pending.
         let appUpdate = menu.addItem(withTitle: "", action: #selector(updateApp),

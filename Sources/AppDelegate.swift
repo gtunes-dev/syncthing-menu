@@ -9,6 +9,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindowController: SettingsWindowController?
     private var aboutWindowController: AboutWindowController?
     private let loginItem = LoginItemController()
+    /// Folders blocked on permissions, shared with the Settings UI (the FDA
+    /// section's alert state). Fed from the monitor's snapshot below.
+    private let folderHealth = FolderHealth()
     private let releaseUpdater = ReleaseUpdater()
     private let syncthingProcess = SyncthingProcess()
     /// The session layer: turns process lifecycle + endpoint reachability into a
@@ -39,7 +42,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settings: .shared,
             appSource: appUpdateSource,
             syncthingSource: syncthingUpdateSource,
-            loginItem: loginItem
+            loginItem: loginItem,
+            folderHealth: folderHealth
         )
         settingsWindowController = settingsController
 
@@ -89,6 +93,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.syncthingMonitor.disconnect()
                 self.syncthingUpdateSource.sessionChanged(api: nil)
                 self.statusItemController?.update(folders: [])
+                // The monitor's last snapshot dies with the daemon.
+                self.statusItemController?.update(allDevicesPaused: false, syncing: false,
+                                                  folderAttention: false)
+                self.folderHealth.permissionErrorFolders = []
             case .connecting:
                 // Transient (startup discovery or post-suspicion re-verify):
                 // consumers keep what they have until it resolves.
@@ -102,11 +110,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.daemonSession.endpointSuspect()
         }
 
-        // The monitor's snapshot drives the icon's Paused/Syncing marks, the
-        // status line, and the Pause⇄Resume toggle label.
+        // The monitor's snapshot drives the icon's Paused/Syncing/attention
+        // marks, the status line, the Pause⇄Resume toggle label, and the FDA
+        // section's alert state in Settings.
         syncthingMonitor.onChange = { [weak self] snapshot in
-            self?.statusItemController?.update(allDevicesPaused: snapshot.allDevicesPaused,
-                                               syncing: snapshot.syncing)
+            guard let self else { return }
+            self.statusItemController?.update(
+                allDevicesPaused: snapshot.allDevicesPaused,
+                syncing: snapshot.syncing,
+                folderAttention: !snapshot.permissionErrorFolders.isEmpty)
+            self.folderHealth.permissionErrorFolders = snapshot.permissionErrorFolders
         }
 
         // After an upgrade is applied, restart the daemon so its supervisor re-roots on

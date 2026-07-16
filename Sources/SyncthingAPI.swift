@@ -122,12 +122,34 @@ struct SyncthingAPI: Equatable {
     /// creation onward, so current state must be read directly.
     func folderState(id: String) async throws -> String {
         struct Response: Decodable { let state: String }
+        let data = try await send("/rest/db/status?folder=\(try Self.encodeQueryValue(id))",
+                                  method: "GET")
+        return try JSONDecoder().decode(Response.self, from: data).state
+    }
+
+    /// One path Syncthing couldn't process in a folder, with its error text.
+    struct FolderError: Decodable, Equatable {
+        let path: String
+        let error: String
+    }
+
+    /// `GET /rest/folder/errors?folder=` → the folder's current scan/pull errors
+    /// (empty when healthy). Seeds the monitor's folder-health view; the
+    /// FolderErrors *event* carries the same shape but only fires when errors
+    /// occur, so recovery must be observed by re-reading this.
+    func folderErrors(id: String) async throws -> [FolderError] {
+        struct Response: Decodable { let errors: [FolderError]? }
+        let data = try await send("/rest/folder/errors?folder=\(try Self.encodeQueryValue(id))",
+                                  method: "GET")
+        return try JSONDecoder().decode(Response.self, from: data).errors ?? []
+    }
+
+    private static func encodeQueryValue(_ value: String) throws -> String {
         let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
-        guard let encoded = id.addingPercentEncoding(withAllowedCharacters: unreserved) else {
+        guard let encoded = value.addingPercentEncoding(withAllowedCharacters: unreserved) else {
             throw APIError.badURL
         }
-        let data = try await send("/rest/db/status?folder=\(encoded)", method: "GET")
-        return try JSONDecoder().decode(Response.self, from: data).state
+        return encoded
     }
 
     // MARK: Devices
@@ -149,17 +171,19 @@ struct SyncthingAPI: Equatable {
 
     /// One event from `/rest/events`. The type-specific `data` payload is
     /// flattened to the fields we consume: StateChanged carries folder/to,
-    /// DevicePaused/DeviceResumed carry device; anything else decodes with all
-    /// three nil (ConfigSaved's payload — the whole new config — is ignored).
+    /// DevicePaused/DeviceResumed carry device, FolderErrors carries
+    /// folder/errors; anything else decodes with all fields nil (ConfigSaved's
+    /// payload — the whole new config — is ignored).
     struct Event: Decodable {
         let id: Int
         let type: String
         let folder: String?
         let to: String?
         let device: String?
+        let errors: [FolderError]?
 
         private enum CodingKeys: String, CodingKey { case id, type, data }
-        private enum DataKeys: String, CodingKey { case folder, to, device }
+        private enum DataKeys: String, CodingKey { case folder, to, device, errors }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -169,8 +193,9 @@ struct SyncthingAPI: Equatable {
                 folder = try? data.decodeIfPresent(String.self, forKey: .folder)
                 to = try? data.decodeIfPresent(String.self, forKey: .to)
                 device = try? data.decodeIfPresent(String.self, forKey: .device)
+                errors = try? data.decodeIfPresent([FolderError].self, forKey: .errors)
             } else {
-                folder = nil; to = nil; device = nil
+                folder = nil; to = nil; device = nil; errors = nil
             }
         }
     }

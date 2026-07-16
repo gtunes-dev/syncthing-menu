@@ -23,6 +23,8 @@ final class FakeSyncthingServer {
         var label = ""
         var path = "/tmp"
         var state = "idle"
+        /// Current scan/pull errors, served by /rest/folder/errors.
+        var errors: [(path: String, error: String)] = []
     }
 
     // MARK: - Scriptable state (all access serialized on `queue`)
@@ -248,6 +250,11 @@ final class FakeSyncthingServer {
         case ("GET", "/rest/db/status"):
             let state = _folders.first { $0.id == query["folder"] }?.state ?? "idle"
             send(["state": state], on: connection)
+        case ("GET", "/rest/folder/errors"):
+            let errors = _folders.first { $0.id == query["folder"] }?.errors ?? []
+            send(["folder": query["folder"] ?? "", "page": 1, "perpage": 100,
+                  "errors": errors.map { ["path": $0.path, "error": $0.error] }],
+                 on: connection)
         case ("GET", "/rest/events"):
             handleEvents(query, on: connection)
         default:

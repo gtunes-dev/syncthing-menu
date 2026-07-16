@@ -24,6 +24,10 @@ final class SyncthingMonitor {
     struct Snapshot: Equatable {
         var allDevicesPaused = false
         var syncing = false
+        /// Display names of folders Syncthing currently can't access for
+        /// permission reasons (macOS TCC → EPERM/EACCES) — the signal that
+        /// drives the Full Disk Access attention state. Sorted for stability.
+        var permissionErrorFolders: [String] = []
     }
 
     /// Called on the main thread once after the initial seed and on every
@@ -45,7 +49,8 @@ final class SyncthingMonitor {
         "scanning", "scan-waiting", "syncing", "sync-waiting", "sync-preparing",
         "cleaning", "clean-waiting",
     ]
-    private static let eventTypes = ["StateChanged", "DevicePaused", "DeviceResumed", "ConfigSaved"]
+    private static let eventTypes = ["StateChanged", "DevicePaused", "DeviceResumed",
+                                     "ConfigSaved", "FolderErrors"]
     /// Server-side long-poll timeout, seconds (the request timeout is padded
     /// past it — see `SyncthingAPI.events`).
     private static let pollTimeout = 50
@@ -57,6 +62,10 @@ final class SyncthingMonitor {
     private var remoteDevices = Set<String>()
     private var pausedDevices = Set<String>()
     private var activeFolders = Set<String>()
+    /// Folder ids whose current errors include a permission failure.
+    private var permissionErrors = Set<String>()
+    /// Folder id → display name (label, falling back to the id).
+    private var folderNames: [String: String] = [:]
     private var published: Snapshot?
 
     /// Start monitoring the daemon behind `api` (a session-verified endpoint).
@@ -72,6 +81,8 @@ final class SyncthingMonitor {
         remoteDevices = []
         pausedDevices = []
         activeFolders = []
+        permissionErrors = []
+        folderNames = [:]
         published = nil
     }
 
@@ -141,11 +152,28 @@ final class SyncthingMonitor {
                 activeFolders.insert(folder)
             } else {
                 activeFolders.remove(folder)
+                // A completed scan/pull may have cleared this folder's errors,
+                // and FolderErrors only fires when errors OCCUR — recovery is
+                // visible only by re-reading. Query just the flagged folders;
+                // keep the flag on a transient read failure.
+                if permissionErrors.contains(folder),
+                   let errors = try? await api.folderErrors(id: folder),
+                   !errors.contains(where: { Self.isPermissionError($0.error) }) {
+                    permissionErrors.remove(folder)
+                }
             }
         case "DevicePaused":
             if let device = event.device { pausedDevices.insert(device) }
         case "DeviceResumed":
             if let device = event.device { pausedDevices.remove(device) }
+        case "FolderErrors":
+            // Carries the folder's CURRENT error list — replace, don't merge.
+            guard let folder = event.folder else { return }
+            if let errors = event.errors, errors.contains(where: { Self.isPermissionError($0.error) }) {
+                permissionErrors.insert(folder)
+            } else {
+                permissionErrors.remove(folder)
+            }
         case "ConfigSaved":
             // Devices/folders may have been added, removed, or (un)paused via
             // config — rebuild both aggregates. Config saves are rare.
@@ -156,7 +184,7 @@ final class SyncthingMonitor {
     }
 
     /// Read current state directly: device pause flags from config, folder
-    /// activity from per-folder status.
+    /// activity from per-folder status, folder health from per-folder errors.
     @MainActor
     private func seed(_ api: SyncthingAPI) async throws {
         let devices = try await api.devices()
@@ -165,21 +193,41 @@ final class SyncthingMonitor {
         pausedDevices = Set(devices.filter(\.paused).map(\.deviceID)).subtracting([myID])
 
         var active = Set<String>()
-        for folder in try await api.folders()
-        where Self.activeStates.contains(try await api.folderState(id: folder.id)) {
-            active.insert(folder.id)
+        var names: [String: String] = [:]
+        var permission = Set<String>()
+        for folder in try await api.folders() {
+            names[folder.id] = folder.label.isEmpty ? folder.id : folder.label
+            if Self.activeStates.contains(try await api.folderState(id: folder.id)) {
+                active.insert(folder.id)
+            }
+            if try await api.folderErrors(id: folder.id)
+                .contains(where: { Self.isPermissionError($0.error) }) {
+                permission.insert(folder.id)
+            }
         }
         activeFolders = active
+        folderNames = names
+        permissionErrors = permission
+    }
+
+    /// The error texts macOS permission failures produce: a TCC denial surfaces
+    /// as EPERM ("operation not permitted") or EACCES ("permission denied") from
+    /// the filesystem, embedded in Syncthing's per-path error strings.
+    private static func isPermissionError(_ message: String) -> Bool {
+        let lowered = message.lowercased()
+        return lowered.contains("operation not permitted")
+            || lowered.contains("permission denied")
     }
 
     @MainActor
     private func publish(force: Bool = false) {
         let snapshot = Snapshot(
             allDevicesPaused: !remoteDevices.isEmpty && remoteDevices.isSubset(of: pausedDevices),
-            syncing: !activeFolders.isEmpty)
+            syncing: !activeFolders.isEmpty,
+            permissionErrorFolders: permissionErrors.map { folderNames[$0] ?? $0 }.sorted())
         guard force || snapshot != published else { return }
         published = snapshot
-        Log.monitor.log("allDevicesPaused=\(snapshot.allDevicesPaused) syncing=\(snapshot.syncing) (active: \(self.activeFolders.isEmpty ? "none" : self.activeFolders.sorted().joined(separator: ","), privacy: .public))")
+        Log.monitor.log("allDevicesPaused=\(snapshot.allDevicesPaused) syncing=\(snapshot.syncing) (active: \(self.activeFolders.isEmpty ? "none" : self.activeFolders.sorted().joined(separator: ","), privacy: .public); permissionErrors: \(snapshot.permissionErrorFolders.isEmpty ? "none" : snapshot.permissionErrorFolders.joined(separator: ","), privacy: .public))")
         onChange?(snapshot)
     }
 }

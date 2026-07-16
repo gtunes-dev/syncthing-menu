@@ -103,6 +103,86 @@ struct SyncthingMonitorTests {
         try await expectEventually { snapshots.last?.allDevicesPaused == true }
     }
 
+    /// Seeding reads each folder's current errors: a permission failure present
+    /// at connect is surfaced immediately (by display name), while ordinary
+    /// errors (disk full, …) never raise the FDA signal.
+    @Test func seedFlagsPermissionErrorsOnly() async throws {
+        let server = FakeSyncthingServer()
+        try server.start()
+        defer { server.stop() }
+        server.folders = [
+            .init(id: "f1", label: "Documents",
+                  errors: [(path: "/Users/x/Documents/a", error: "scanning: open: operation not permitted")]),
+            .init(id: "f2", label: "Cabinet",
+                  errors: [(path: "/Users/x/Cabinet/b", error: "no space left on device")]),
+            .init(id: "f3", label: "Photos"),
+        ]
+
+        let monitor = SyncthingMonitor()
+        defer { monitor.disconnect() }
+        var snapshots: [SyncthingMonitor.Snapshot] = []
+        monitor.onChange = { snapshots.append($0) }
+
+        monitor.connect(api: api(for: server))
+        try await expectEventually { !snapshots.isEmpty }
+        #expect(snapshots.first?.permissionErrorFolders == ["Documents"])
+    }
+
+    /// A FolderErrors event carries the folder's CURRENT error list: permission
+    /// errors raise the signal, and a later list without them clears it.
+    @Test func folderErrorsEventsRaiseAndReplace() async throws {
+        let server = FakeSyncthingServer()
+        try server.start()
+        defer { server.stop() }
+        server.folders = [.init(id: "f1", label: "Documents")]
+
+        let monitor = SyncthingMonitor()
+        defer { monitor.disconnect() }
+        var snapshots: [SyncthingMonitor.Snapshot] = []
+        monitor.onChange = { snapshots.append($0) }
+
+        monitor.connect(api: api(for: server))
+        try await expectEventually { !snapshots.isEmpty }
+        #expect(snapshots.first?.permissionErrorFolders == [])
+
+        server.pushEvent(type: "FolderErrors", data: [
+            "folder": "f1",
+            "errors": [["path": "/Users/x/Documents/a", "error": "pulling: permission denied"]],
+        ])
+        try await expectEventually { snapshots.last?.permissionErrorFolders == ["Documents"] }
+
+        server.pushEvent(type: "FolderErrors", data: [
+            "folder": "f1",
+            "errors": [["path": "/Users/x/Documents/b", "error": "connection reset"]],
+        ])
+        try await expectEventually { snapshots.last?.permissionErrorFolders == [] }
+    }
+
+    /// Recovery is silent (FolderErrors only fires when errors OCCUR): when a
+    /// flagged folder finishes a scan/pull cleanly, the monitor re-reads its
+    /// errors and clears the signal.
+    @Test func recoveryClearsOnCleanScan() async throws {
+        let server = FakeSyncthingServer()
+        try server.start()
+        defer { server.stop() }
+        server.folders = [.init(id: "f1", label: "Documents",
+                                errors: [(path: "/a", error: "operation not permitted")])]
+
+        let monitor = SyncthingMonitor()
+        defer { monitor.disconnect() }
+        var snapshots: [SyncthingMonitor.Snapshot] = []
+        monitor.onChange = { snapshots.append($0) }
+
+        monitor.connect(api: api(for: server))
+        try await expectEventually { snapshots.last?.permissionErrorFolders == ["Documents"] }
+
+        // FDA granted: the next scan succeeds — errors gone, folder lands idle.
+        server.folders = [.init(id: "f1", label: "Documents")]
+        server.pushEvent(type: "StateChanged", data: ["folder": "f1", "to": "scanning"])
+        server.pushEvent(type: "StateChanged", data: ["folder": "f1", "to": "idle"])
+        try await expectEventually { snapshots.last?.permissionErrorFolders == [] }
+    }
+
     /// The health-probe contract: a persistently dark endpoint escalates exactly
     /// once (after the tolerated failures) and the monitor stops on its own — the
     /// session owns recovery from there.

@@ -11,9 +11,19 @@ struct SettingsView: View {
     @ObservedObject var appSettings: UpdateChannelSettings
     @ObservedObject var syncthingSettings: UpdateChannelSettings
     @ObservedObject var loginItem: LoginItemController
+    @ObservedObject var folderHealth: FolderHealth
 
     private var appVersion: String {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "—"
+    }
+
+    /// The FDA section's alert message, when folders are blocked on permissions.
+    private var fdaAttention: String? {
+        let folders = folderHealth.permissionErrorFolders
+        guard !folders.isEmpty else { return nil }
+        let list = folders.map { "“\($0)”" }.joined(separator: ", ")
+        return "Syncthing can't access \(folders.count == 1 ? "the folder" : "these folders"): "
+            + "\(list). This usually means it needs Full Disk Access."
     }
 
     var body: some View {
@@ -42,7 +52,8 @@ struct SettingsView: View {
 
                 Divider()
 
-                FullDiskAccessSection(binaryURL: ReleaseUpdater.installedBinaryURL)
+                FullDiskAccessSection(binaryURL: ReleaseUpdater.installedBinaryURL,
+                                      attention: fdaAttention)
             }
         }
         .padding(20)

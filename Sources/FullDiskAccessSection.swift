@@ -72,7 +72,8 @@ private struct FullDiskAccessHelp: View {
                 step(1, "Click the button below — it reveals the syncthing file in Finder and "
                      + "opens Privacy & Security › Full Disk Access.")
                 step(2, "Drag that syncthing file into the Full Disk Access list.")
-                step(3, "Turn its switch on. Syncing resumes automatically — no restart needed.")
+                step(3, "Turn its switch on, then choose “Rescan All” from the menu-bar menu "
+                     + "so Syncthing retries right away.")
             }
 
             Button {

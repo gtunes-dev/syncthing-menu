@@ -12,15 +12,18 @@ final class SettingsWindowController {
     private let appSource: UpdateSource
     private let syncthingSource: UpdateSource
     private let loginItem: LoginItemController
+    private let folderHealth: FolderHealth
 
     init(settings: Settings,
          appSource: UpdateSource,
          syncthingSource: UpdateSource,
-         loginItem: LoginItemController) {
+         loginItem: LoginItemController,
+         folderHealth: FolderHealth) {
         self.settings = settings
         self.appSource = appSource
         self.syncthingSource = syncthingSource
         self.loginItem = loginItem
+        self.folderHealth = folderHealth
     }
 
     /// Show the settings window, creating it on first use and re-focusing it
@@ -31,7 +34,8 @@ final class SettingsWindowController {
                                     syncthingSource: syncthingSource,
                                     appSettings: settings.app,
                                     syncthingSettings: settings.syncthing,
-                                    loginItem: loginItem)
+                                    loginItem: loginItem,
+                                    folderHealth: folderHealth)
             let hosting = NSHostingController(rootView: root)
             let newWindow = NSWindow(contentViewController: hosting)
             newWindow.title = "Syncthing Menu Settings"
