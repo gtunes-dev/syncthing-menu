@@ -15,9 +15,15 @@ export TEST_RUNNER_OS_ACTIVITY_MODE="${TEST_RUNNER_OS_ACTIVITY_MODE:-disable}"
 # otherwise block-buffered and phase markers print out of order.
 export NSUnbufferedIO=YES
 
+# The grep drops the legacy XCTest harness's empty "'All tests' ... Executed
+# 0 tests" preamble — xcodebuild always runs that harness over the bundle
+# before Swift Testing and it can't be disabled; ours has no XCTest tests, so
+# its report is pure confusion. (Same filter as CI. Real XCTest suites, if
+# ever added, would still report per-suite.)
 xcodebuild \
   -project SyncthingMenu.xcodeproj \
   -scheme SyncthingMenu \
   -destination 'platform=macOS' \
   CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES \
-  test "$@"
+  test "$@" 2>&1 \
+  | grep -vE "^Test Suite 'All tests' (started|passed) at|^[[:space:]]*Executed 0 tests, with 0 failures \(0 unexpected\)"

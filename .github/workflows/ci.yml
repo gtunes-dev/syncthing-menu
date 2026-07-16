@@ -53,6 +53,13 @@ jobs:
         # us). It's cosmetic, so if the image ever drops it the step must NOT
         # fail — the guard below falls back to raw output with a visible
         # warning annotation instead.
+        # The tests are Swift Testing only, but xcodebuild always runs the legacy
+        # XCTest harness over the bundle first, printing an empty "'All tests'
+        # ... Executed 0 tests" report that reads like a broken duplicate run.
+        # That pass can't be disabled, so drop exactly its lines from the console
+        # view (the raw artifact log keeps everything). If XCTest-style tests are
+        # ever added, their per-suite results still show — only the 'All tests'
+        # aggregate and zero-executed summaries are filtered.
         run: |
           set -o pipefail
           render() { xcbeautify --renderer github-actions; }
@@ -65,7 +72,9 @@ jobs:
             -scheme SyncthingMenu \
             -destination 'platform=macOS' \
             CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES \
-            test 2>&1 | tee xcodebuild-raw.log | render
+            test 2>&1 | tee xcodebuild-raw.log \
+            | grep -vE "^Test Suite 'All tests' (started|passed) at|^[[:space:]]*Executed 0 tests, with 0 failures \(0 unexpected\)" \
+            | render
 
       - name: Upload raw build/test log
         if: failure()
