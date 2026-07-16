@@ -2,20 +2,25 @@ import Foundation
 import CryptoKit
 
 /// Downloads the official Syncthing macOS binary from GitHub Releases, verifies
-/// its SHA-256, and installs it into the app's private support directory — the
-/// initial "bootstrap". Ongoing updates are handled by the daemon itself (via its
-/// REST upgrade API), not here.
+/// it, and installs it into the app's private support directory — the initial
+/// "bootstrap". Ongoing updates are handled by the daemon itself (via its REST
+/// upgrade API), not here.
 ///
-/// NOTE (first slice): this verifies the SHA-256 published in `sha256sum.txt.asc`.
-/// Verifying that file's *GPG signature* against Syncthing's release key is a
-/// planned hardening step — see TODO below.
+/// Two verification layers: the SHA-256 published in `sha256sum.txt.asc`
+/// (integrity of the download), and the extracted binary's Developer-ID code
+/// signature pinned to Syncthing's team (provenance — see `BinaryVerifier`:
+/// checking the executable itself through the OS trust stack covers tampering
+/// anywhere upstream, including the checksum file).
 struct ReleaseUpdater {
-    enum BootstrapError: Error {
+    enum BootstrapError: Error, Equatable {
         case noUniversalAsset
         case noChecksumAsset
         case checksumNotFound
         case checksumMismatch(expected: String, actual: String)
         case binaryNotFoundInArchive
+        /// Our own install came out quarantined — the download pipeline's
+        /// no-quarantine assumption no longer holds; needs investigation.
+        case unexpectedlyQuarantined
     }
 
     /// Where the managed Syncthing binary lives.
@@ -52,8 +57,6 @@ struct ReleaseUpdater {
         let (zipData, _) = try await URLSession.shared.data(from: zipAsset.downloadURL)
         let (sumData, _) = try await URLSession.shared.data(from: sumAsset.downloadURL)
 
-        // TODO (hardening): verify the GPG signature of sha256sum.txt.asc against
-        // Syncthing's pinned release public key before trusting its contents.
         let expected = try Self.expectedSHA256(forAsset: zipAsset.name, in: sumData)
         let actual = Self.sha256Hex(of: zipData)
         guard actual == expected else {
@@ -138,12 +141,23 @@ struct ReleaseUpdater {
             throw BootstrapError.binaryNotFoundInArchive
         }
 
+        // Provenance gate: only a binary Developer-ID signed by Syncthing's
+        // team is ever installed.
+        try BinaryVerifier.verifySyncthingBinary(at: binary)
+
         let dest = installedBinaryURL
         try fm.createDirectory(at: dest.deletingLastPathComponent(),
                                withIntermediateDirectories: true)
         if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
         try fm.copyItem(at: binary, to: dest)
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dest.path)
+        // Assumption check, not a mutation: our pipeline never quarantines, so
+        // a flagged install means the environment changed — refuse and surface
+        // it rather than clear a security marker we can't explain.
+        guard !BinaryVerifier.isQuarantined(at: dest) else {
+            try? fm.removeItem(at: dest)
+            throw BootstrapError.unexpectedlyQuarantined
+        }
         return dest
     }
 

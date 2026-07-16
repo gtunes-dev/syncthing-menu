@@ -8,12 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- The app now detects when Syncthing can't access a folder for permission reasons — the usual cause is missing Full Disk Access. The menu-bar icon switches to its alert mark even while Syncthing is otherwise running, the status line reads "Can't access some folders", the Settings… menu item carries a caution badge pointing at where the fix lives, and the Full Disk Access section in Settings names the affected folders with the fix one click away. The alert clears on its own once access works again. Other folder errors (network, disk) don't trigger it.
-- A documented way to inspect logs and report a problem. The app now logs through the macOS unified logging system under the subsystem `io.github.gtunes-dev.SyncthingMenu` (view in Console.app or with `log stream`), and Syncthing keeps its own rotating log file at `~/Library/Application Support/Syncthing Menu/home/syncthing.log`, which survives app restarts. The README's new Troubleshooting section documents how to gather both for a bug report.
-- An automated test suite, run locally and in CI on every push. The first tests cover the new reconnect behavior and the live-state monitor — endpoint discovery, API-key rotation, address moves, transient failures, and escalation — exercised against an in-process fake of Syncthing's REST API on a real local socket. Also covered: the Syncthing update check's version-comparison and release-selection logic, verified against Syncthing's own test tables, and the release-notes links and version display rules.
+- The Syncthing binary is now verified — signature and developer identity — at installation and before every launch.
+- The app detects when Syncthing can't access a folder and alerts in the menu and in Settings, where the affected folders are named and the fix (usually Full Disk Access) is one click away.
+- A documented way to inspect logs and report a problem: the app logs to the macOS unified log, Syncthing keeps its own rotating log file, and the README's new Troubleshooting section covers both.
+- An automated test suite, run locally and in CI on every push.
 
 ### Changed
-- The app now reconnects to Syncthing automatically if its REST endpoint changes while running — for example, regenerating the API key (or moving the GUI address) in Syncthing's own settings no longer breaks the menu, the live status, or update checks until the next relaunch. The connection is re-verified and re-established within seconds, from Syncthing's own configuration.
+- The app reconnects to Syncthing automatically if its REST endpoint changes while running (for example, after regenerating the API key in Syncthing's settings) — no relaunch needed.
 
 ## [0.1.8] - 2026-07-09
 

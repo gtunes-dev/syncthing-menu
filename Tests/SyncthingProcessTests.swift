@@ -41,6 +41,7 @@ private final class StubDaemonFixture {
 
         process = SyncthingProcess(binaryURL: binary, homeURL: home)
         process.escalationGrace = 0.2
+        process.verifyBinary = { _ in }   // the stubs are unsigned scripts
         process.onStateChange = { [weak self] in self?.states.append($0) }
     }
 
@@ -114,6 +115,21 @@ struct SyncthingProcessTests {
         fixture.process.restart()
         try await expectEventually(timeout: 15) { fixture.isRunning && fixture.runCount == 2 }
         #expect(!fixture.states.contains { if case .failed = $0 { return true } else { return false } })
+    }
+
+    /// The default spawn path verifies provenance: with the real verifier in
+    /// place (the fixture normally stubs it out), an unsigned binary is never
+    /// spawned — the launch fails before posix_spawn.
+    @Test func unsignedBinaryIsNeverSpawned() async throws {
+        let fixture = try StubDaemonFixture(script: Self.stayAlive)
+        defer { fixture.tearDown() }
+        fixture.process.verifyBinary = BinaryVerifier.verifySyncthingBinary
+
+        fixture.process.start()
+        try await expectEventually(timeout: 15) { fixture.isFailed }
+        #expect(fixture.runCount == 0)
+        guard case let .failed(message) = fixture.process.state else { return }
+        #expect(message.contains("verification"))
     }
 
     /// The stop ladder's last rung: a daemon that ignores SIGTERM is SIGKILLed,

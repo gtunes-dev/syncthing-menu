@@ -54,6 +54,13 @@ final class SyncthingProcess {
     /// without real multi-second waits.
     var escalationGrace: TimeInterval = 3
 
+    /// Verifies the binary's provenance before EVERY spawn (~35ms, off-main in
+    /// launch prep) — fresh launch, Start Syncthing, and the post-upgrade
+    /// re-root all pass through here, so a binary the daemon's self-upgrade
+    /// wrote is checked too. Injectable seam: the process tests spawn unsigned
+    /// stub scripts.
+    var verifyBinary: (URL) throws -> Void = BinaryVerifier.verifySyncthingBinary
+
     init(binaryURL: URL = ReleaseUpdater.installedBinaryURL,
          homeURL: URL = SyncthingProcess.defaultHomeURL) {
         self.binaryURL = binaryURL
@@ -190,6 +197,8 @@ final class SyncthingProcess {
     }
 
     private func prepareLaunch() throws -> LaunchPlan {
+        try verifyBinary(binaryURL)
+
         let fm = FileManager.default
         try fm.createDirectory(at: homeURL, withIntermediateDirectories: true)
 
