@@ -61,7 +61,7 @@ struct ReleaseUpdater {
         }
 
         let installed = try Self.installBinary(fromZip: zipData)
-        NSLog("ReleaseUpdater: installed Syncthing \(release.tag) at \(installed.path)")
+        Log.updates.log("installed Syncthing \(release.tag, privacy: .public) at \(installed.path, privacy: .public)")
         return installed
     }
 

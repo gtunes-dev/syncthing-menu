@@ -49,8 +49,7 @@ final class AppUpdateSource: UpdateSource {
         // through the interactive alert instead of the silent path).
         controller.updater.automaticallyChecksForUpdates = false
         controller.updater.automaticallyDownloadsUpdates = true
-        NSLog("[Updates] Sparkle config: allowsAutomaticUpdates=%d automaticallyDownloadsUpdates=%d",
-              controller.updater.allowsAutomaticUpdates, controller.updater.automaticallyDownloadsUpdates)
+        Log.updates.log("Sparkle config: allowsAutomaticUpdates=\(self.controller.updater.allowsAutomaticUpdates) automaticallyDownloadsUpdates=\(self.controller.updater.automaticallyDownloadsUpdates)")
     }
 
     /// Debug builds never fight the production appcast: a dev build always reads the
@@ -60,7 +59,7 @@ final class AppUpdateSource: UpdateSource {
     override func makeAvailable() {
         #if DEBUG
         guard feedURLOverride != nil else {
-            NSLog("[Updates] Syncthing Menu channel disabled in Debug builds (set SPARKLE_TEST_FEED_URL to enable)")
+            Log.updates.log("Syncthing Menu channel disabled in Debug builds (set SPARKLE_TEST_FEED_URL to enable)")
             return
         }
         #endif

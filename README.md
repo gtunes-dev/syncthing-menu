@@ -113,6 +113,35 @@ last checked.
   <img src="docs/settings.png" alt="The Syncthing Menu Settings window" width="440">
 </p>
 
+## Troubleshooting & reporting a problem
+
+Syncthing Menu logs through the macOS unified logging system under the
+subsystem `io.github.gtunes-dev.SyncthingMenu`. To watch events live, use
+Console.app (filter by that subsystem) or:
+
+```sh
+log stream --predicate 'subsystem == "io.github.gtunes-dev.SyncthingMenu"'
+```
+
+To capture recent history for a bug report:
+
+```sh
+log show --last 2h --predicate 'subsystem == "io.github.gtunes-dev.SyncthingMenu"' > syncthing-menu.log
+```
+
+The Syncthing daemon also keeps its own rotating log file, which survives app
+restarts:
+
+```
+~/Library/Application Support/Syncthing Menu/home/syncthing.log
+```
+
+When [filing an issue](https://github.com/gtunes-dev/syncthing-menu/issues),
+please attach both logs along with the app and Syncthing versions from the
+About box. **Before posting, review both logs and redact anything you'd rather
+not share** — the daemon log in particular can mention your folder names and
+paths, device names and IDs, and local network addresses. Issues are public.
+
 ## Building
 
 Requires Xcode 16 or later.

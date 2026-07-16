@@ -121,7 +121,7 @@ final class SyncthingMonitor {
                 // it re-verifies.
                 consecutiveFailures += 1
                 if consecutiveFailures >= Self.failuresBeforeSuspect {
-                    NSLog("[Monitor] endpoint suspect after \(consecutiveFailures) failures — escalating")
+                    Log.monitor.log("endpoint suspect after \(consecutiveFailures) failures — escalating")
                     onEndpointSuspect?()
                     return
                 }
@@ -179,9 +179,7 @@ final class SyncthingMonitor {
             syncing: !activeFolders.isEmpty)
         guard force || snapshot != published else { return }
         published = snapshot
-        NSLog("[Monitor] allDevicesPaused=%d syncing=%d (active: %@)",
-              snapshot.allDevicesPaused, snapshot.syncing,
-              activeFolders.isEmpty ? "none" : activeFolders.sorted().joined(separator: ","))
+        Log.monitor.log("allDevicesPaused=\(snapshot.allDevicesPaused) syncing=\(snapshot.syncing) (active: \(self.activeFolders.isEmpty ? "none" : self.activeFolders.sorted().joined(separator: ","), privacy: .public))")
         onChange?(snapshot)
     }
 }

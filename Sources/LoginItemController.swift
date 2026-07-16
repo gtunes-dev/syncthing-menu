@@ -28,7 +28,7 @@ final class LoginItemController: ObservableObject {
                 try SMAppService.mainApp.unregister()
             }
         } catch {
-            NSLog("Login item change to \(enabled) failed: \(error.localizedDescription)")
+            Log.app.error("Login item change to \(enabled) failed: \(error.localizedDescription, privacy: .public)")
         }
         refresh()
     }

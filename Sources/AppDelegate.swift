@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import os
 
 /// Application lifecycle owner. Owns the menu-bar controller, the settings and about
 /// windows, the Syncthing subprocess supervisor, and the two update channels.
@@ -144,10 +145,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             do {
                 let url = try await releaseUpdater.bootstrapIfNeeded()
-                NSLog("Syncthing binary ready at \(url.path)")
+                Log.app.log("Syncthing binary ready at \(url.path, privacy: .public)")
                 self.syncthingProcess.start()
             } catch {
-                NSLog("Syncthing bootstrap failed: \(error)")
+                Log.app.error("Syncthing bootstrap failed: \(String(describing: error), privacy: .public)")
             }
         }
     }
@@ -186,7 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let api = currentAPI else { return }
         Task {
             do { try await api.rescanAll() }
-            catch { NSLog("Rescan all failed: \(error)") }
+            catch { Log.app.error("Rescan all failed: \(String(describing: error), privacy: .public)") }
         }
     }
 
@@ -203,7 +204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try await api.resumeAllDevices()
                 }
             } catch {
-                NSLog("\(pause ? "Pause" : "Resume") all devices failed: \(error)")
+                Log.app.error("\(pause ? "Pause" : "Resume", privacy: .public) all devices failed: \(String(describing: error), privacy: .public)")
             }
         }
     }

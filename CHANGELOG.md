@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A documented way to inspect logs and report a problem. The app now logs through the macOS unified logging system under the subsystem `io.github.gtunes-dev.SyncthingMenu` (view in Console.app or with `log stream`), and Syncthing keeps its own rotating log file at `~/Library/Application Support/Syncthing Menu/home/syncthing.log`, which survives app restarts. The README's new Troubleshooting section documents how to gather both for a bug report.
 - An automated test suite, run locally and in CI on every push. The first tests cover the new reconnect behavior and the live-state monitor — endpoint discovery, API-key rotation, address moves, transient failures, and escalation — exercised against an in-process fake of Syncthing's REST API on a real local socket. Also covered: the Syncthing update check's version-comparison and release-selection logic, verified against Syncthing's own test tables, and the release-notes links and version display rules.
 
 ### Changed

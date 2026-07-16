@@ -10,8 +10,16 @@
       "problemMatcher": []
     },
     {
+      "label": "Tail Logs",
+      "detail": "Stream the app's unified-log events live (all categories under the app subsystem). Run alongside the Run task — os.Logger output does not appear in the app's own terminal.",
+      "type": "shell",
+      "command": "/usr/bin/log stream --level debug --style compact --predicate 'subsystem == \"io.github.gtunes-dev.SyncthingMenu\"'",
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
+    },
+    {
       "label": "Run",
-      "detail": "Build, then launch the app in the foreground so console logs (print/os_log) appear here. Stop with Ctrl+C or the app's Quit menu.",
+      "detail": "Build, then launch the app in the foreground. App log events go to the unified log — use the 'Tail Logs' task to watch them live. Stop with Ctrl+C or the app's Quit menu.",
       "type": "shell",
       "command": "\"${workspaceFolder}/build/Debug/Syncthing Menu.app/Contents/MacOS/Syncthing Menu\"",
       "dependsOn": "Build (Debug)",

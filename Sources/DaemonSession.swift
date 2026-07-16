@@ -119,7 +119,7 @@ final class DaemonSession {
                         // it is corrected on the reconnect its config save causes).
                         try? await api.setAutoUpgradeIntervalH(0)
                         guard self.generation == token else { return }
-                        NSLog("[Session] connected: \(endpoint.guiURL)")
+                        Log.session.log("connected: \(endpoint.guiURL, privacy: .public)")
                         self.state = .connected(api)
                         return
                     }

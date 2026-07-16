@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import os
 
 /// Launches and supervises the managed Syncthing daemon as a child process.
 ///
@@ -125,13 +126,13 @@ final class SyncthingProcess {
             Task {
                 do {
                     try await api.shutdown()
-                    NSLog("[syncthing] REST shutdown request accepted")
+                    Log.process.log("REST shutdown request accepted")
                 } catch {
-                    NSLog("[syncthing] REST shutdown request failed: \(error.localizedDescription)")
+                    Log.process.log("REST shutdown request failed: \(error.localizedDescription, privacy: .public)")
                 }
             }
         } else {
-            NSLog("[syncthing] no REST endpoint available — stopping via signal")
+            Log.process.log("no REST endpoint available — stopping via signal")
         }
     }
 
@@ -142,19 +143,19 @@ final class SyncthingProcess {
         func elapsed() -> String { String(format: "%.1fs", Date().timeIntervalSince(start)) }
 
         if waitForExit(pid, escalationGrace) {
-            NSLog("[syncthing] stopped via REST shutdown (\(elapsed()))")
+            Log.process.log("stopped via REST shutdown (\(elapsed(), privacy: .public))")
             return
         }
-        NSLog("[syncthing] REST shutdown didn't complete in \(escalationGrace)s — falling back to SIGTERM")
+        Log.process.log("REST shutdown didn't complete in \(self.escalationGrace)s — falling back to SIGTERM")
         kill(pid, SIGTERM)
         if waitForExit(pid, escalationGrace) {
-            NSLog("[syncthing] stopped via SIGTERM (\(elapsed()))")
+            Log.process.log("stopped via SIGTERM (\(elapsed(), privacy: .public))")
             return
         }
-        NSLog("[syncthing] SIGTERM didn't complete in \(escalationGrace)s — sending SIGKILL")
+        Log.process.log("SIGTERM didn't complete in \(self.escalationGrace)s — sending SIGKILL")
         kill(pid, SIGKILL)
         _ = waitForExit(pid, 2)
-        NSLog("[syncthing] stopped via SIGKILL (\(elapsed()))")
+        Log.process.log("stopped via SIGKILL (\(elapsed(), privacy: .public))")
     }
 
     /// Poll `waitpid` until the process is reaped or `seconds` elapse; returns whether reaped.
@@ -257,6 +258,13 @@ final class SyncthingProcess {
         // A terminal stop may have landed while we prepared off-main; never spawn after that.
         guard !isTerminating else { return }
         var args = [binaryURL.path, "serve", "--home", homeURL.path, "--no-browser"]
+        // Durable daemon log, rotated by Syncthing itself (2 MiB × 3 old files).
+        // The daemon TEES to this file — stdout still carries everything
+        // (verified on v2.1.2), so the live relay to the unified log below is
+        // unaffected. This file is what survives app quits and unified-log
+        // retention: the artifact a user attaches to a bug report.
+        args += ["--log-file", homeURL.appendingPathComponent("syncthing.log").path,
+                 "--log-max-size", "2097152", "--log-max-old-files", "3"]
         if let override = plan.guiAddressOverride {
             args += ["--gui-address", override]
         }
@@ -286,7 +294,7 @@ final class SyncthingProcess {
         if let disclaim = Self.disclaimFn {
             _ = disclaim(&attr, 1)
         } else {
-            NSLog("[syncthing] warning: disclaim API unavailable; FDA grants on the daemon may not apply")
+            Log.process.warning("disclaim API unavailable; FDA grants on the daemon may not apply")
         }
         defer { posix_spawnattr_destroy(&attr) }
 
@@ -322,7 +330,7 @@ final class SyncthingProcess {
             let data = h.availableData
             guard !data.isEmpty else { h.readabilityHandler = nil; return }   // EOF
             if let text = String(data: data, encoding: .utf8) {
-                NSLog("[syncthing] \(text.trimmingCharacters(in: .newlines))")
+                Log.syncthing.log("\(text.trimmingCharacters(in: .newlines), privacy: .public)")
             }
         }
         stdoutHandle = handle
@@ -353,7 +361,7 @@ final class SyncthingProcess {
         guiURL = plan.guiURL
         usedGUIAddressOverride = plan.guiAddressOverride != nil
         state = .running(guiURL: plan.guiURL)
-        NSLog("Syncthing daemon started at \(plan.guiURL) (home: \(homeURL.path))")
+        Log.process.log("daemon started at \(plan.guiURL, privacy: .public) (home: \(self.homeURL.path, privacy: .public))")
     }
 
     // MARK: - Disclaimed spawn (TCC responsible process)

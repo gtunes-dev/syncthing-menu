@@ -191,7 +191,7 @@ class UpdateSource: ObservableObject {
     func installAvailable(userInitiated: Bool = true) {
         guard isAvailable, case .available = state else { return }
         guard coordinator.claim(self) else {
-            NSLog("[Updates] %@: install deferred — another update is installing", name)
+            Log.updates.log("\(self.name, privacy: .public): install deferred — another update is installing")
             return
         }
         let offered = state
