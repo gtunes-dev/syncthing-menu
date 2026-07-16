@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-16
+
 ### Added
 - The Syncthing binary is now verified — signature and developer identity — at installation and before every launch.
 - The app detects when Syncthing can't access a folder and alerts in the menu and in Settings, where the affected folders are named and the fix (usually Full Disk Access) is one click away.
