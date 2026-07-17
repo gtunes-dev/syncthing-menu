@@ -104,7 +104,12 @@ class UpdateSource: ObservableObject {
     private var epoch = 0
     /// Guards against overlapping checks (e.g. a poll tick landing on an in-flight check).
     private var checkInFlight = false
-    private var pollTimer: Timer?
+    private var pollTimer: DispatchSourceTimer?
+    private var retryTimer: DispatchSourceTimer?
+    /// How soon a FAILED check retries while auto-check is on — much sooner than
+    /// the next poll, so a transient cause (wake before Wi-Fi is up, a feed
+    /// outage) costs minutes, not a day. Injectable seam for tests.
+    var checkRetryInterval: TimeInterval = 15 * 60
     private var cancellables = Set<AnyCancellable>()
 
     init(name: String, settings: UpdateChannelSettings,
@@ -135,7 +140,10 @@ class UpdateSource: ObservableObject {
             .store(in: &cancellables)
     }
 
-    deinit { pollTimer?.invalidate() }
+    deinit {
+        pollTimer?.cancel()
+        retryTimer?.cancel()
+    }
 
     // MARK: - Availability (raised by the subclass)
 
@@ -229,10 +237,14 @@ class UpdateSource: ObservableObject {
             do {
                 result = try await self.checkForUpdate()
             } catch {
-                if self.epoch == token { self.state = .unknown }
+                if self.epoch == token {
+                    self.state = .unknown
+                    self.armRetry()
+                }
                 return
             }
             guard self.epoch == token else { return }
+            self.cancelRetry()
             if let version { self.currentVersion = version }
             self.settings.lastChecked = Date()
             self.state = result
@@ -270,17 +282,61 @@ class UpdateSource: ObservableObject {
 
     private func startPolling() {
         guard pollTimer == nil else { return }
-        // `.common` so a tick isn't deferred by runloop tracking (an open menu, a scroll).
-        let timer = Timer(timeInterval: pollInterval, repeats: true) { [weak self] _ in
-            self?.checkNow()
-        }
-        RunLoop.main.add(timer, forMode: .common)
+        // Wall-clock scheduling, NOT a run-loop Timer: run-loop timers count
+        // awake-time only, so a 24h timer on a mostly-sleeping laptop fires
+        // every several calendar days (found on a real MacBook during the
+        // 0.2.0 soak — "last checked 4 days ago" with the app running). A wall
+        // deadline means calendar time, and one slept through fires at the
+        // next wake. The leeway lets a wake-adjacent fire drift past network
+        // re-association.
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(wallDeadline: .now() + pollInterval, repeating: pollInterval,
+                       leeway: Self.leeway(for: pollInterval))
+        timer.setEventHandler { [weak self] in self?.checkNow() }
+        timer.resume()
         pollTimer = timer
     }
 
+    /// Timer slack, proportional to the interval (10%, capped at 60s). The
+    /// system uses the FULL leeway freely (measured: 0.3s timers with 60s
+    /// leeway deferred beyond 5s), so a fixed leeway would make short
+    /// intervals meaningless — proportional keeps production timers
+    /// power-friendly and test-scale timers predictable.
+    private static func leeway(for interval: TimeInterval) -> DispatchTimeInterval {
+        .milliseconds(Int(min(interval * 0.1, 60) * 1000))
+    }
+
     private func stopPolling() {
-        pollTimer?.invalidate()
+        pollTimer?.cancel()
         pollTimer = nil
+        cancelRetry()
+    }
+
+    /// A failed check while auto-check is on retries within `checkRetryInterval`
+    /// instead of waiting out the full poll interval — transient causes (waking
+    /// before Wi-Fi is up, an offline moment) should cost minutes, not a day.
+    /// One-shot and wall-clock (a retry slept through fires at next wake);
+    /// cancelled by any completed check and whenever polling stops (channel
+    /// unavailable, auto-check turned off).
+    private func armRetry() {
+        guard settings.autoCheckEnabled, retryTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(wallDeadline: .now() + checkRetryInterval,
+                       leeway: Self.leeway(for: checkRetryInterval))
+        timer.setEventHandler { [weak self] in
+            // A delivery already enqueued when cancelRetry() ran still executes:
+            // the nil check makes cancellation authoritative on this queue.
+            guard let self, self.retryTimer != nil else { return }
+            self.retryTimer = nil
+            self.checkNow()
+        }
+        timer.resume()
+        retryTimer = timer
+    }
+
+    private func cancelRetry() {
+        retryTimer?.cancel()
+        retryTimer = nil
     }
 
     // MARK: - Mechanism (the subclass provides these)

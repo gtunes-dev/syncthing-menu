@@ -144,6 +144,89 @@ struct UpdateSourcePolicyTests {
         #expect(source.settings.lastChecked == nil)
     }
 
+    /// A failed check retries on its own (much sooner than the poll interval),
+    /// and a retry that succeeds ends the retrying.
+    @Test func failedCheckRetriesUntilSuccess() async throws {
+        let source = await makeSource(autoCheck: true, autoInstall: false)
+        source.checkRetryInterval = 0.15
+        source.checkResult = .failure(AnyError())
+
+        source.makeAvailable()
+        try await expectEventually { source.checkCount == 1 && source.state == .unknown }
+
+        // First retry fires and fails too …
+        try await expectEventually { source.checkCount == 2 }
+        // … then the cause clears and the next retry succeeds.
+        source.checkResult = .success(.upToDate)
+        try await expectEventually { source.state == .upToDate }
+        #expect(source.settings.lastChecked != nil)
+
+        // Success ended the retrying: no further checks accumulate.
+        let settled = source.checkCount
+        try await Task.sleep(nanoseconds: 500_000_000)
+        #expect(source.checkCount == settled)
+    }
+
+    /// A completed check cancels a pending retry — no double-checking after
+    /// the user's manual Check Now resolves the failure early.
+    @Test func completedCheckCancelsPendingRetry() async throws {
+        let source = await makeSource(autoCheck: true, autoInstall: false)
+        source.checkRetryInterval = 0.4
+        source.checkResult = .failure(AnyError())
+
+        source.makeAvailable()
+        try await expectEventually { source.checkCount == 1 && source.state == .unknown }
+
+        // Manual check succeeds; the pending retry is cancelled by completion.
+        // (A retry may legitimately fire before the manual check lands if the
+        // scheduler stalls — so assert quiescence, not an exact count.)
+        source.checkResult = .success(.upToDate)
+        source.checkNow()
+        try await expectEventually { source.state == .upToDate }
+
+        try await Task.sleep(nanoseconds: 500_000_000)
+        let settled = source.checkCount
+        try await Task.sleep(nanoseconds: 700_000_000)
+        #expect(source.checkCount == settled)
+    }
+
+    /// Turning auto-check off ends the retrying: an opted-out channel goes
+    /// quiet. (One retry may legitimately land while the toggle is still
+    /// propagating — the pinned guarantee is quiescence, not zero strays:
+    /// nothing can RE-arm after the toggle, because arming reads the setting
+    /// synchronously.)
+    @Test func disablingAutoCheckEndsRetrying() async throws {
+        let source = await makeSource(autoCheck: true, autoInstall: false)
+        source.checkRetryInterval = 0.15
+        source.checkResult = .failure(AnyError())
+
+        source.makeAvailable()
+        try await expectEventually { source.checkCount >= 1 }
+
+        source.settings.autoCheckEnabled = false
+        // Window for any in-flight stray to land and fail (it cannot re-arm) …
+        try await Task.sleep(nanoseconds: 500_000_000)
+        // … then the channel must be silent.
+        let settled = source.checkCount
+        try await Task.sleep(nanoseconds: 500_000_000)
+        #expect(source.checkCount == settled)
+    }
+
+    /// With auto-check off, a failed manual check does NOT retry — only the
+    /// user probes an opted-out channel.
+    @Test func noRetryWhenAutoCheckOff() async throws {
+        let source = await makeSource(autoCheck: false, autoInstall: false)
+        source.checkRetryInterval = 0.15
+        source.checkResult = .failure(AnyError())
+        source.makeAvailable()
+        try await expectEventually { source.currentVersion != nil }
+
+        source.checkNow()
+        try await expectEventually { source.checkCount == 1 && source.state == .unknown }
+        try await Task.sleep(nanoseconds: 500_000_000)
+        #expect(source.checkCount == 1)
+    }
+
     /// A check superseded by unavailability discards its result — no stale state,
     /// no recorded check.
     @Test func unavailabilitySupersedesInFlightCheck() async throws {
