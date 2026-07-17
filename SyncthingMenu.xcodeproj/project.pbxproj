@@ -250,7 +250,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "io.github.gtunes-dev.SyncthingMenu";
 				PRODUCT_MODULE_NAME = SyncthingMenu;
 				PRODUCT_NAME = "Syncthing Menu";
@@ -274,7 +274,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.2.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "io.github.gtunes-dev.SyncthingMenu";
 				PRODUCT_MODULE_NAME = SyncthingMenu;
 				PRODUCT_NAME = "Syncthing Menu";
