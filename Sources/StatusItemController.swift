@@ -40,6 +40,9 @@ final class StatusItemController: NSObject {
     /// Apply the pending update (the click is the consent — majors included).
     var onUpdateApp: (() -> Void)?
     var onUpdateSyncthing: (() -> Void)?
+    /// `reset` = the Option-key alternate: open at default frame with
+    /// default column widths (a factory reset of the window's layout).
+    var onOpenActivity: ((_ reset: Bool) -> Void)?
 
     private var statusMenuItem: NSMenuItem?
     private let statusRow = StatusRowView()
@@ -48,11 +51,12 @@ final class StatusItemController: NSObject {
     private var startItem: NSMenuItem?
     private var settingsItem: NSMenuItem?
     private var webUIItem: NSMenuItem?
+    private var activityItem: NSMenuItem?
     private var foldersItem: NSMenuItem?
     private var rescanItem: NSMenuItem?
     private var pauseToggleItem: NSMenuItem?
     private var allDevicesPaused = false
-    private var syncing = false
+    private var activity: SyncActivity = .idle
     /// A folder Syncthing can't access (permission error) — needs the user.
     private var folderAttention = false
     private var appUpdate: PendingUpdate?
@@ -126,9 +130,9 @@ final class StatusItemController: NSObject {
     /// label, the status line, and the icon (Paused/Syncing marks). Fed by
     /// `SyncthingMonitor` over the daemon's push event stream, so it stays
     /// current without the menu being opened.
-    func update(allDevicesPaused: Bool, syncing: Bool, folderAttention: Bool) {
+    func update(allDevicesPaused: Bool, activity: SyncActivity, folderAttention: Bool) {
         self.allDevicesPaused = allDevicesPaused
-        self.syncing = syncing
+        self.activity = activity
         self.folderAttention = folderAttention
         pauseToggleItem?.title = allDevicesPaused ? "Resume All Devices" : "Pause All Devices"
         refreshSettingsBadge()
@@ -140,44 +144,81 @@ final class StatusItemController: NSObject {
     /// the status line names the problem, the badge points at where the fix
     /// lives (the FDA section there is in its alert state). Settings is an
     /// app-section item, so the daemon section stays free of app verbs.
+    ///
+    /// macOS 26+ AUTO-ASSIGNS the system gear to a "Settings…" item by
+    /// setting its `image` (lazily — not yet present at build time). So never
+    /// write `nil` as the rest state: only swap in the badge (capturing
+    /// whatever the system put there) and restore the captured image when the
+    /// attention clears. Writing nil permanently killed the system gear.
     private func refreshSettingsBadge() {
         let running = if case .running = daemonState { true } else { false }
-        settingsItem?.image = (running && folderAttention) ? Self.attentionBadge : nil
+        if running && folderAttention {
+            if settingsItem?.image !== Self.attentionBadge {
+                defaultSettingsImage = settingsItem?.image
+                settingsItem?.image = Self.attentionBadge
+            }
+        } else if settingsItem?.image === Self.attentionBadge {
+            settingsItem?.image = defaultSettingsImage
+        }
     }
 
+    /// The Settings… item's image before we overlaid the caution badge —
+    /// the system-provided gear on macOS 26+, nil on older systems.
+    private var defaultSettingsImage: NSImage?
+
     /// The same caution mark the Settings FDA section shows (orange
-    /// exclamationmark.triangle.fill), pre-rendered into a plain image: the
+    /// exclamationmark.triangle.fill), rasterized into a REAL bitmap: the
     /// menu renderer doesn't draw color-configured symbol images (verified on
-    /// macOS 27), but has always honored ordinary bitmaps.
+    /// macOS 27), and a handler-backed NSImage (deferred drawing) gets its
+    /// icon column reserved a frame before its pixels exist — a visible
+    /// "inset but empty" beat. A bitmap-backed image draws atomically.
     private static let attentionBadge: NSImage = {
         guard let symbol = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
                                    accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .regular)) else {
             return NSImage()
         }
-        let image = NSImage(size: symbol.size, flipped: false) { rect in
-            symbol.draw(in: rect)
-            NSColor.systemOrange.setFill()
-            rect.fill(using: .sourceAtop)   // tint the glyph, keep its alpha
-            return true
+        let size = symbol.size
+        let scale: CGFloat = 2   // Retina rasterization
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                         pixelsWide: Int(size.width * scale),
+                                         pixelsHigh: Int(size.height * scale),
+                                         bitsPerSample: 8, samplesPerPixel: 4,
+                                         hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .calibratedRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0) else {
+            return NSImage()
         }
+        rep.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        let rect = NSRect(origin: .zero, size: size)
+        symbol.draw(in: rect)
+        NSColor.systemOrange.setFill()
+        rect.fill(using: .sourceAtop)   // tint the glyph, keep its alpha
+        NSGraphicsContext.restoreGraphicsState()
+        let image = NSImage(size: size)
+        image.addRepresentation(rep)
         image.accessibilityDescription = "Needs attention"
         return image
     }()
 
     /// The running daemon's status line. Attention (a folder Syncthing can't
     /// access) outranks everything — it needs the user's action; Paused outranks
-    /// Syncing: a pause is the user's deliberate mode, and dominates transient
-    /// scan activity.
+    /// activity: a pause is the user's deliberate mode, and dominates transient
+    /// scan activity. The text distinguishes Scanning from Syncing (the icon
+    /// stays coarse — one activity mark for either).
     private func setRunningStatus() {
         if folderAttention {
             setStatus(dot: .systemOrange, detail: "Can't access some folders")
         } else if allDevicesPaused {
             setStatus(dot: .systemOrange, detail: "Paused")
-        } else if syncing {
-            setStatus(dot: .systemGreen, detail: "Syncing…")
         } else {
-            setStatus(dot: .systemGreen, detail: "Running")
+            switch activity {
+            case .syncing: setStatus(dot: .systemGreen, detail: "Syncing…")
+            case .scanning: setStatus(dot: .systemGreen, detail: "Scanning…")
+            case .idle: setStatus(dot: .systemGreen, detail: "Running")
+            }
         }
     }
 
@@ -252,8 +293,10 @@ final class StatusItemController: NSObject {
             // Attention = the error mark even though the daemon runs: the
             // condition needs the user, and the icon is the only always-visible
             // surface. Below that, Paused (deliberate mode) outranks Syncing.
+            // Scanning and syncing share the one activity mark: the icon is a
+            // preattentive summary ("busy"), the texts carry the distinction.
             base = folderAttention ? "Error"
-                 : (allDevicesPaused ? "Paused" : (syncing ? "Syncing" : "Idle"))
+                 : (allDevicesPaused ? "Paused" : (activity != .idle ? "Syncing" : "Idle"))
             dimmed = false
         case .stopped, .starting: base = "Idle"; dimmed = true
         case .failed: base = "Error"; dimmed = false
@@ -280,7 +323,9 @@ final class StatusItemController: NSObject {
             state = folderAttention
                 ? "Syncthing can't access some folders — open Settings (Full Disk Access may be needed)"
                 : allDevicesPaused ? "Syncthing is paused"
-                                   : (syncing ? "Syncthing is syncing" : "Syncthing is running")
+                : activity == .syncing ? "Syncthing is syncing"
+                : activity == .scanning ? "Syncthing is scanning"
+                : "Syncthing is running"
         case let .failed(message): state = "Syncthing failed — \(message)"
         }
         var parts = ["Syncthing Menu — \(state)"]
@@ -302,6 +347,20 @@ final class StatusItemController: NSObject {
         aboutItem.target = self
 
         menu.addItem(.separator())
+
+        let activity = menu.addItem(withTitle: "Activity…",
+                                    action: #selector(openActivity), keyEquivalent: "")
+        activity.target = self
+        activityItem = activity
+
+        // Holding ⌥ swaps the item for its reset variant — the native
+        // alternate-item idiom, so the escape hatch is discoverable.
+        let activityReset = menu.addItem(withTitle: "Activity (Reset Layout)…",
+                                         action: #selector(openActivityReset),
+                                         keyEquivalent: "")
+        activityReset.target = self
+        activityReset.isAlternate = true
+        activityReset.keyEquivalentModifierMask = [.option]
 
         let settings = menu.addItem(withTitle: "Settings…",
                                     action: #selector(openSettings), keyEquivalent: "")
@@ -388,6 +447,14 @@ final class StatusItemController: NSObject {
 
     @objc private func startSyncthing() {
         onStartSyncthing?()
+    }
+
+    @objc private func openActivity() {
+        onOpenActivity?(false)
+    }
+
+    @objc private func openActivityReset() {
+        onOpenActivity?(true)
     }
 
     @objc private func updateApp() {

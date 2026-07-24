@@ -156,9 +156,11 @@ struct SyncthingAPI: Equatable {
 
     /// One configured device. Decoded from `/rest/config/devices`; the local device
     /// appears in the list too — filter it out via `myID()` where it matters.
+    /// `name` is the user-assigned display name (may be empty).
     struct Device: Decodable, Equatable {
         let deviceID: String
         let paused: Bool
+        var name: String? = nil
     }
 
     /// `GET /rest/config/devices` → the configured devices (including this one).
@@ -216,6 +218,122 @@ struct SyncthingAPI: Equatable {
         let data = try await send("/rest/events?\(query)", method: "GET",
                                   timeoutInterval: TimeInterval(timeout + 10))
         return try JSONDecoder().decode([Event].self, from: data)
+    }
+
+    /// One event from the activity stream (`ActivityFeed`), decoded to a
+    /// common flattened shape. Field naming differs per type —
+    /// ItemStarted/ItemFinished carry the path as `item` with `action`
+    /// update/metadata/delete; the disk-change events carry it as `path` with
+    /// `action` modified/deleted plus `label` and `modifiedBy` (the short id
+    /// of the device that originated the change). LocalIndexUpdated carries
+    /// `filenames` + the batch's closing `sequence`; FolderCompletion carries
+    /// `device`, `completion`, `needItems`, `sequence` (per remote device).
+    struct ActivityEvent: Decodable {
+        let id: Int
+        let type: String
+        /// The daemon's per-event wall-clock timestamp; falls back to the
+        /// receive time if it fails to parse.
+        let time: Date
+        let folder: String?
+        let label: String?
+        let path: String?
+        let action: String?
+        let itemKind: String?    // "file" / "dir" / "symlink"
+        let modifiedBy: String?
+        let error: String?
+        let device: String?
+        let sequence: Int64?
+        let completion: Double?
+        let needItems: Int?
+        let filenames: [String]?
+        /// RemoteDownloadProgress: the paths the remote device is actively
+        /// downloading (the keys of its `state` block-count map).
+        let downloadingPaths: [String]?
+
+        private enum CodingKeys: String, CodingKey { case id, type, time, data }
+        private enum DataKeys: String, CodingKey {
+            case folder, label, path, item, action, type, modifiedBy, error
+            case device, sequence, completion, needItems, filenames, state
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decode(Int.self, forKey: .id)
+            type = try container.decode(String.self, forKey: .type)
+            time = Self.parseTime(try? container.decode(String.self, forKey: .time))
+            if let data = try? container.nestedContainer(keyedBy: DataKeys.self, forKey: .data) {
+                folder = try? data.decodeIfPresent(String.self, forKey: .folder)
+                label = try? data.decodeIfPresent(String.self, forKey: .label)
+                path = (try? data.decodeIfPresent(String.self, forKey: .path))
+                    ?? (try? data.decodeIfPresent(String.self, forKey: .item))
+                action = try? data.decodeIfPresent(String.self, forKey: .action)
+                itemKind = try? data.decodeIfPresent(String.self, forKey: .type)
+                modifiedBy = try? data.decodeIfPresent(String.self, forKey: .modifiedBy)
+                error = try? data.decodeIfPresent(String.self, forKey: .error)
+                device = try? data.decodeIfPresent(String.self, forKey: .device)
+                sequence = try? data.decodeIfPresent(Int64.self, forKey: .sequence)
+                completion = try? data.decodeIfPresent(Double.self, forKey: .completion)
+                needItems = try? data.decodeIfPresent(Int.self, forKey: .needItems)
+                filenames = try? data.decodeIfPresent([String].self, forKey: .filenames)
+                downloadingPaths = (try? data.decodeIfPresent([String: Int].self, forKey: .state))
+                    .map { Array($0.keys) }
+            } else {
+                folder = nil; label = nil; path = nil; action = nil
+                itemKind = nil; modifiedBy = nil; error = nil
+                device = nil; sequence = nil; completion = nil; needItems = nil
+                filenames = nil; downloadingPaths = nil
+            }
+        }
+
+        private static let isoWithFraction: ISO8601DateFormatter = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter
+        }()
+        private static let isoPlain = ISO8601DateFormatter()
+
+        /// The daemon emits RFC 3339 with nanosecond fractions;
+        /// `ISO8601DateFormatter` only accepts millisecond fractions, so trim
+        /// the excess digits before parsing.
+        private static func parseTime(_ raw: String?) -> Date {
+            guard let raw else { return Date() }
+            let trimmed = raw.replacingOccurrences(of: #"(\.\d{1,3})\d*"#, with: "$1",
+                                                   options: .regularExpression)
+            return isoWithFraction.date(from: trimmed)
+                ?? isoPlain.date(from: raw)
+                ?? Date()
+        }
+    }
+
+    /// The activity stream — long-poll semantics identical to `events`, but a
+    /// distinct filter (thus a distinct server-side subscription) decoding the
+    /// richer change-lifecycle payloads. The disk-change events must be named
+    /// explicitly: they are excluded from the default event mask.
+    /// LocalIndexUpdated + FolderCompletion drive the delivery watermark for
+    /// local changes; RemoteDownloadProgress marks pending rows a remote is
+    /// actively fetching (see `ActivityFeed`).
+    static let activityEventTypes = ["LocalChangeDetected", "RemoteChangeDetected",
+                                     "ItemStarted", "ItemFinished",
+                                     "LocalIndexUpdated", "FolderCompletion",
+                                     "RemoteDownloadProgress"]
+
+    func activityEvents(since: Int, timeout: Int, limit: Int? = nil) async throws -> [ActivityEvent] {
+        var query = "since=\(since)&timeout=\(timeout)&events=\(Self.activityEventTypes.joined(separator: ","))"
+        if let limit { query += "&limit=\(limit)" }
+        let data = try await send("/rest/events?\(query)", method: "GET",
+                                  timeoutInterval: TimeInterval(timeout + 10))
+        return try JSONDecoder().decode([ActivityEvent].self, from: data)
+    }
+
+    /// `GET /rest/events/disk` — the daemon's always-on recent-changes buffer
+    /// (LocalChangeDetected + RemoteChangeDetected, ring of 1000, populated
+    /// since daemon start). Unlike an ad-hoc filtered subscription this HAS
+    /// history, so it seeds the Activity window on open. One-shot: returns the
+    /// newest `limit` immediately (timeout=1 so an empty buffer can't park).
+    func diskEvents(limit: Int) async throws -> [ActivityEvent] {
+        let data = try await send("/rest/events/disk?since=0&limit=\(limit)&timeout=1",
+                                  method: "GET", timeoutInterval: 15)
+        return try JSONDecoder().decode([ActivityEvent].self, from: data)
     }
 
     // MARK: - Request plumbing

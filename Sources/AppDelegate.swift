@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: StatusItemController?
     private var settingsWindowController: SettingsWindowController?
     private var aboutWindowController: AboutWindowController?
+    private var activityWindowController: ActivityWindowController?
     private let loginItem = LoginItemController()
     /// Folders blocked on permissions, shared with the Settings UI (the FDA
     /// section's alert state). Fed from the monitor's snapshot below.
@@ -23,6 +24,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Live daemon-state feed (pause/sync activity) over the events API — the
     /// single source of truth for daemon-side state while it runs.
     private let syncthingMonitor = SyncthingMonitor()
+    /// Per-file change feed for the Activity window. Polls only while that
+    /// window is visible.
+    private let activityFeed = ActivityFeed()
+    /// Global status shared with the Activity window (subtitle + toolbar
+    /// enablement), recomputed from the process state + monitor snapshot.
+    private let syncthingStatus = SyncthingStatusModel()
+    private var lastDaemonState: SyncthingProcess.State = .stopped
+    private var lastMonitorSnapshot = SyncthingMonitor.Snapshot()
     private var cancellables = Set<AnyCancellable>()
 
     // Update channels behind the shared `UpdateSource` policy engine: the app via
@@ -52,10 +61,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         aboutWindowController = aboutController
 
+        let activityController = ActivityWindowController(feed: activityFeed,
+                                                          status: syncthingStatus)
+        activityController.onVisibilityChange = { [weak self] visible in
+            self?.activityFeed.setWindowVisible(visible)
+        }
+        // The window's toolbar verbs are the menu's verbs — same handlers.
+        activityController.onRescanAll = { [weak self] in self?.rescanAll() }
+        activityController.onPauseToggle = { [weak self] pause in self?.setAllDevicesPaused(pause) }
+        activityWindowController = activityController
+
         let controller = StatusItemController(
             onOpenSettings: { settingsController.show() },
             onAbout: { aboutController.show() }
         )
+        controller.onOpenActivity = { reset in activityController.show(reset: reset) }
         controller.onMenuWillOpen = { [weak self] in self?.refreshFolders() }
         controller.onStartSyncthing = { [weak self] in self?.launchDaemon() }
         controller.onRescanAll = { [weak self] in self?.rescanAll() }
@@ -70,6 +90,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         syncthingProcess.onStateChange = { [weak self] state in
             guard let self else { return }
             self.statusItemController?.update(daemonState: state)
+            self.lastDaemonState = state
+            self.pushStatus()
             self.daemonSession.processStateChanged(state)
         }
 
@@ -82,6 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // real identity changes, so a blip recovery on the same endpoint
                 // doesn't reset an in-flight install or re-trigger checks.
                 self.syncthingMonitor.connect(api: api)
+                self.activityFeed.connect(api: api)
                 if api != self.lastPublishedAPI {
                     self.lastPublishedAPI = api
                     self.syncthingUpdateSource.sessionChanged(api: api)
@@ -91,12 +114,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .unavailable:
                 self.lastPublishedAPI = nil
                 self.syncthingMonitor.disconnect()
+                self.activityFeed.disconnect()
                 self.syncthingUpdateSource.sessionChanged(api: nil)
                 self.statusItemController?.update(folders: [])
                 // The monitor's last snapshot dies with the daemon.
-                self.statusItemController?.update(allDevicesPaused: false, syncing: false,
+                self.statusItemController?.update(allDevicesPaused: false, activity: .idle,
                                                   folderAttention: false)
                 self.folderHealth.permissionErrorFolders = []
+                self.lastMonitorSnapshot = .init()
+                self.pushStatus()
             case .connecting:
                 // Transient (startup discovery or post-suspicion re-verify):
                 // consumers keep what they have until it resolves.
@@ -117,9 +143,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.statusItemController?.update(
                 allDevicesPaused: snapshot.allDevicesPaused,
-                syncing: snapshot.syncing,
+                activity: snapshot.activity,
                 folderAttention: !snapshot.permissionErrorFolders.isEmpty)
             self.folderHealth.permissionErrorFolders = snapshot.permissionErrorFolders
+            self.lastMonitorSnapshot = snapshot
+            self.pushStatus()
         }
 
         // After an upgrade is applied, restart the daemon so its supervisor re-roots on
@@ -174,6 +202,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                       enabled: Bool) -> StatusItemController.PendingUpdate? {
         guard case let .available(version, isMajor) = state else { return nil }
         return .init(version: version, isMajor: isMajor, enabled: enabled)
+    }
+
+    /// Recompute the shared global-status phase from the latest process state
+    /// + monitor snapshot.
+    private func pushStatus() {
+        let phase: SyncthingStatusModel.Phase
+        switch lastDaemonState {
+        case .stopped: phase = .notRunning
+        case .starting: phase = .starting
+        case .running:
+            phase = .running(activity: lastMonitorSnapshot.activity,
+                             paused: lastMonitorSnapshot.allDevicesPaused,
+                             attention: !lastMonitorSnapshot.permissionErrorFolders.isEmpty)
+        case let .failed(message): phase = .failed(message)
+        }
+        syncthingStatus.update(phase)
     }
 
     /// A REST client for the running daemon, or nil when it isn't reachable.

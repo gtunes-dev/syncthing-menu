@@ -31,7 +31,7 @@ struct SyncthingMonitorTests {
         try await expectEventually { !snapshots.isEmpty }
 
         // The only remote device (A) is paused; SELF must not count.
-        #expect(snapshots.first == .init(allDevicesPaused: true, syncing: false))
+        #expect(snapshots.first == .init(allDevicesPaused: true, activity: .idle))
     }
 
     /// StateChanged events flip folder activity — including back to idle.
@@ -49,11 +49,20 @@ struct SyncthingMonitorTests {
         monitor.connect(api: api(for: server))
         try await expectEventually { !snapshots.isEmpty }
 
-        server.pushEvent(type: "StateChanged", data: ["folder": "f1", "to": "syncing"])
-        try await expectEventually { snapshots.last?.syncing == true }
+        // Scanning and syncing are distinct aggregates; syncing outranks
+        // scanning when both families are active across folders.
+        server.pushEvent(type: "StateChanged", data: ["folder": "f1", "to": "scanning"])
+        try await expectEventually { snapshots.last?.activity == .scanning }
 
+        server.pushEvent(type: "StateChanged", data: ["folder": "f1", "to": "syncing"])
+        try await expectEventually { snapshots.last?.activity == .syncing }
+
+        server.pushEvent(type: "StateChanged", data: ["folder": "f2", "to": "scanning"])
         server.pushEvent(type: "StateChanged", data: ["folder": "f1", "to": "idle"])
-        try await expectEventually { snapshots.last?.syncing == false }
+        try await expectEventually { snapshots.last?.activity == .scanning }
+
+        server.pushEvent(type: "StateChanged", data: ["folder": "f2", "to": "idle"])
+        try await expectEventually { snapshots.last?.activity == .idle }
     }
 
     /// DevicePaused/DeviceResumed drive the all-devices-paused aggregate.
@@ -235,12 +244,12 @@ struct SyncthingMonitorTests {
         server.failNextRequests = 2
         server.folders = [.init(id: "f1", state: "syncing")]
         server.pushEvent(type: "StateChanged", data: ["folder": "f1", "to": "syncing"])
-        try await expectEventually { snapshots.last?.syncing == true }
+        try await expectEventually { snapshots.last?.activity == .syncing }
 
         // Let the scripted failures and the reseed play out: still no escalation,
         // and the snapshot holds.
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(suspected == 0)
-        #expect(snapshots.last?.syncing == true)
+        #expect(snapshots.last?.activity == .syncing)
     }
 }

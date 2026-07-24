@@ -11,7 +11,8 @@ import Foundation
 /// Tracks two aggregates and reports them on the main thread:
 /// - **allDevicesPaused** — every remote device paused (drives the Paused
 ///   state and the menu's Pause⇄Resume toggle)
-/// - **syncing** — any folder actively scanning/syncing (drives Syncing)
+/// - **activity** — idle/scanning/syncing across all folders (syncing
+///   outranks scanning; drives the icon's Syncing mark and the status texts)
 ///
 /// A filtered event subscription is created on first use and only reports
 /// events from that moment on (verified live — there is NO usable history
@@ -20,10 +21,21 @@ import Foundation
 /// on connect, on ConfigSaved, and after any stream error. The event cursor
 /// is established BEFORE seeding, so a change landing mid-seed is still
 /// delivered by the first long-poll — no gap.
+/// Aggregate folder activity, coarsened from Syncthing's per-folder states.
+/// Three values because they mean different things to the user: scanning is
+/// local housekeeping (hashing, no network), syncing is data actually moving
+/// between devices. Syncing outranks scanning in every aggregate — transfer
+/// is the more consequential fact, so the display never understates.
+enum SyncActivity: Equatable {
+    case idle
+    case scanning
+    case syncing
+}
+
 final class SyncthingMonitor {
     struct Snapshot: Equatable {
         var allDevicesPaused = false
-        var syncing = false
+        var activity: SyncActivity = .idle
         /// Display names of folders Syncthing currently can't access for
         /// permission reasons (macOS TCC → EPERM/EACCES) — the signal that
         /// drives the Full Disk Access attention state. Sorted for stability.
@@ -42,12 +54,14 @@ final class SyncthingMonitor {
     /// when it verifies (see `DaemonSession.endpointSuspect`).
     var onEndpointSuspect: (() -> Void)?
 
-    /// Folder states that count as activity — including the queued "-waiting"
-    /// states (folders scan/sync in turn; a waiting folder is part of an active
-    /// run). Anything else (idle, error, …) clears the folder.
-    private static let activeStates: Set<String> = [
-        "scanning", "scan-waiting", "syncing", "sync-waiting", "sync-preparing",
-        "cleaning", "clean-waiting",
+    /// Folder states that count as activity, split into the two families the
+    /// aggregate distinguishes — including the queued "-waiting" states
+    /// (folders scan/sync in turn; a waiting folder is part of an active run).
+    /// Cleaning is post-pull cleanup, so it belongs to the sync episode.
+    /// Anything else (idle, error, …) clears the folder.
+    private static let scanningStates: Set<String> = ["scanning", "scan-waiting"]
+    private static let syncingStates: Set<String> = [
+        "syncing", "sync-waiting", "sync-preparing", "cleaning", "clean-waiting",
     ]
     private static let eventTypes = ["StateChanged", "DevicePaused", "DeviceResumed",
                                      "ConfigSaved", "FolderErrors"]
@@ -61,7 +75,8 @@ final class SyncthingMonitor {
     // run the network work off-main).
     private var remoteDevices = Set<String>()
     private var pausedDevices = Set<String>()
-    private var activeFolders = Set<String>()
+    private var scanningFolders = Set<String>()
+    private var syncingFolders = Set<String>()
     /// Folder ids whose current errors include a permission failure.
     private var permissionErrors = Set<String>()
     /// Folder id → display name (label, falling back to the id).
@@ -80,7 +95,8 @@ final class SyncthingMonitor {
         task = nil
         remoteDevices = []
         pausedDevices = []
-        activeFolders = []
+        scanningFolders = []
+        syncingFolders = []
         permissionErrors = []
         folderNames = [:]
         published = nil
@@ -148,10 +164,15 @@ final class SyncthingMonitor {
         switch event.type {
         case "StateChanged":
             guard let folder = event.folder else { return }
-            if let to = event.to, Self.activeStates.contains(to) {
-                activeFolders.insert(folder)
+            if let to = event.to, Self.scanningStates.contains(to) {
+                scanningFolders.insert(folder)
+                syncingFolders.remove(folder)
+            } else if let to = event.to, Self.syncingStates.contains(to) {
+                syncingFolders.insert(folder)
+                scanningFolders.remove(folder)
             } else {
-                activeFolders.remove(folder)
+                scanningFolders.remove(folder)
+                syncingFolders.remove(folder)
                 // A completed scan/pull may have cleared this folder's errors,
                 // and FolderErrors only fires when errors OCCUR — recovery is
                 // visible only by re-reading. Query just the flagged folders;
@@ -192,20 +213,25 @@ final class SyncthingMonitor {
         remoteDevices = Set(devices.map(\.deviceID)).subtracting([myID])
         pausedDevices = Set(devices.filter(\.paused).map(\.deviceID)).subtracting([myID])
 
-        var active = Set<String>()
+        var scanning = Set<String>()
+        var syncing = Set<String>()
         var names: [String: String] = [:]
         var permission = Set<String>()
         for folder in try await api.folders() {
             names[folder.id] = folder.label.isEmpty ? folder.id : folder.label
-            if Self.activeStates.contains(try await api.folderState(id: folder.id)) {
-                active.insert(folder.id)
+            let state = try await api.folderState(id: folder.id)
+            if Self.scanningStates.contains(state) {
+                scanning.insert(folder.id)
+            } else if Self.syncingStates.contains(state) {
+                syncing.insert(folder.id)
             }
             if try await api.folderErrors(id: folder.id)
                 .contains(where: { Self.isPermissionError($0.error) }) {
                 permission.insert(folder.id)
             }
         }
-        activeFolders = active
+        scanningFolders = scanning
+        syncingFolders = syncing
         folderNames = names
         permissionErrors = permission
     }
@@ -221,13 +247,15 @@ final class SyncthingMonitor {
 
     @MainActor
     private func publish(force: Bool = false) {
+        let activity: SyncActivity = !syncingFolders.isEmpty ? .syncing
+                                   : !scanningFolders.isEmpty ? .scanning : .idle
         let snapshot = Snapshot(
             allDevicesPaused: !remoteDevices.isEmpty && remoteDevices.isSubset(of: pausedDevices),
-            syncing: !activeFolders.isEmpty,
+            activity: activity,
             permissionErrorFolders: permissionErrors.map { folderNames[$0] ?? $0 }.sorted())
         guard force || snapshot != published else { return }
         published = snapshot
-        Log.monitor.log("allDevicesPaused=\(snapshot.allDevicesPaused) syncing=\(snapshot.syncing) (active: \(self.activeFolders.isEmpty ? "none" : self.activeFolders.sorted().joined(separator: ","), privacy: .public); permissionErrors: \(snapshot.permissionErrorFolders.isEmpty ? "none" : snapshot.permissionErrorFolders.joined(separator: ","), privacy: .public))")
+        Log.monitor.log("allDevicesPaused=\(snapshot.allDevicesPaused) activity=\(String(describing: snapshot.activity), privacy: .public) (scanning: \(self.scanningFolders.isEmpty ? "none" : self.scanningFolders.sorted().joined(separator: ","), privacy: .public); syncing: \(self.syncingFolders.isEmpty ? "none" : self.syncingFolders.sorted().joined(separator: ","), privacy: .public); permissionErrors: \(snapshot.permissionErrorFolders.isEmpty ? "none" : snapshot.permissionErrorFolders.joined(separator: ","), privacy: .public))")
         onChange?(snapshot)
     }
 }

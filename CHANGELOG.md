@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- An Activity window (menu: Activity…) showing Syncthing's file-level activity live: each change's file and folder, which device made the change, and how far along it is — waiting to sync, actively transferring, delivered to another device, applied on this Mac, or failed (with the error shown on hover). The view can be filtered by change type and origin, sorted by any column (Finder-style), and kept above other windows with the pin button; holding Option turns the menu item into "Activity (Reset Layout)…", which restores the window's default size, columns, filters, and settings. The window costs nothing while closed — the app follows Syncthing's activity stream only while it's open.
+
+### Changed
+- The menu status line, icon tooltip, and Activity window now distinguish Scanning (checking local files for changes) from Syncing (transferring data between devices).
+
+### Fixed
+- On macOS 26 and later, the Settings… menu item no longer loses the gear icon the system gives it.
+
 ## [0.2.1] - 2026-07-16
 
 ### Fixed

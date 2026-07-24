@@ -16,6 +16,7 @@ final class FakeSyncthingServer {
     struct Device {
         var deviceID: String
         var paused: Bool
+        var name = ""
     }
 
     struct Folder {
@@ -40,6 +41,16 @@ final class FakeSyncthingServer {
 
     private var events: [(id: Int, json: [String: Any])] = []
     private var nextEventID = 1
+
+    /// The always-on disk-events ring (/rest/events/disk) — scripted history
+    /// for ActivityFeed's seeding path.
+    private var diskEvents: [[String: Any]] = []
+    private var nextDiskEventID = 1
+
+    /// Every request path (with query) the server received, in order — lets
+    /// tests assert what traffic DID and DIDN'T happen (e.g. the activity
+    /// feed's polls-only-while-visible contract).
+    private var _requestedPaths: [String] = []
 
     private final class Waiter {
         let since: Int
@@ -99,6 +110,20 @@ final class FakeSyncthingServer {
     /// order — lets tests assert the no-self-upgrade invariant was (re)applied.
     var recordedAutoUpgradeIntervals: [Int] {
         queue.sync { _recordedAutoUpgradeIntervals }
+    }
+
+    var requestedPaths: [String] {
+        queue.sync { _requestedPaths }
+    }
+
+    /// Append one event to the disk-events history (/rest/events/disk).
+    func seedDiskEvent(type: String, data: [String: Any]) {
+        queue.sync {
+            let id = nextDiskEventID
+            nextDiskEventID += 1
+            diskEvents.append(["id": id, "globalID": id, "type": type,
+                               "time": "2026-01-01T00:00:00Z", "data": data])
+        }
     }
 
     // MARK: - Lifecycle
@@ -215,6 +240,7 @@ final class FakeSyncthingServer {
     }
 
     private func handle(_ request: Request, on connection: NWConnection) {
+        _requestedPaths.append(request.path)
         if _failNextRequests > 0 {
             _failNextRequests -= 1
             send(["error": "scripted failure"], status: 500, on: connection)
@@ -244,7 +270,8 @@ final class FakeSyncthingServer {
             }
             send([:], on: connection)
         case ("GET", "/rest/config/devices"):
-            send(_devices.map { ["deviceID": $0.deviceID, "paused": $0.paused] }, on: connection)
+            send(_devices.map { ["deviceID": $0.deviceID, "paused": $0.paused, "name": $0.name] },
+                 on: connection)
         case ("GET", "/rest/config/folders"):
             send(_folders.map { ["id": $0.id, "label": $0.label, "path": $0.path] }, on: connection)
         case ("GET", "/rest/db/status"):
@@ -257,6 +284,14 @@ final class FakeSyncthingServer {
                  on: connection)
         case ("GET", "/rest/events"):
             handleEvents(query, on: connection)
+        case ("GET", "/rest/events/disk"):
+            // The real endpoint is an always-on ring with history; a one-shot
+            // read (what the feed's seeding does) never parks.
+            var matching = diskEvents
+            if let limit = query["limit"].flatMap(Int.init) {
+                matching = Array(matching.suffix(limit))
+            }
+            send(matching, on: connection)
         default:
             send(["error": "not found"], status: 404, on: connection)
         }
