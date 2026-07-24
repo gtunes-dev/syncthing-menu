@@ -23,22 +23,32 @@ struct ActivityView: View {
     @ObservedObject var display: ActivityDisplayModel
 
     var body: some View {
-        let visible = feed.rows.filter(display.allows)
-            .sorted(using: display.effectiveSortOrder)
-        VStack(spacing: 0) {
-            // A filtered feed must LOOK filtered — a quiet list under an
-            // invisible filter reads as "syncing broke".
-            if display.isActive {
-                filterBar
-                Divider()
-            }
-            Group {
-                if visible.isEmpty {
-                    emptyFeed(filtered: display.isActive && !feed.rows.isEmpty)
-                } else if #available(macOS 14.0, *) {
-                    CustomizableFeedTable(rows: visible, sortOrder: sortBinding)
-                } else {
-                    LegacyFeedTable(rows: visible, sortOrder: sortBinding)
+        // ONE minute-clock for the whole view, passed down as a plain value:
+        // per-cell TimelineViews (timers firing inside NSTableView cell
+        // contexts) caused reentrant-delegate warnings when overnight timer
+        // coalescing batched their wakeups (diagnosed 2026-07-24 from the
+        // 10s-quantized warning timestamps). A single top-down state change
+        // per minute keeps the cells timer-free.
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            let visible = feed.rows.filter(display.allows)
+                .sorted(using: display.effectiveSortOrder)
+            VStack(spacing: 0) {
+                // A filtered feed must LOOK filtered — a quiet list under an
+                // invisible filter reads as "syncing broke".
+                if display.isActive {
+                    filterBar
+                    Divider()
+                }
+                Group {
+                    if visible.isEmpty {
+                        emptyFeed(filtered: display.isActive && !feed.rows.isEmpty)
+                    } else if #available(macOS 14.0, *) {
+                        CustomizableFeedTable(rows: visible, sortOrder: sortBinding,
+                                              now: context.date)
+                    } else {
+                        LegacyFeedTable(rows: visible, sortOrder: sortBinding,
+                                        now: context.date)
+                    }
                 }
             }
         }
@@ -231,11 +241,14 @@ extension Notification.Name {
 private struct CustomizableFeedTable: View {
     let rows: [ActivityFeed.Row]
     @Binding var sortOrder: [KeyPathComparator<ActivityFeed.Row>]
+    let now: Date
     @State private var customization: TableColumnCustomization<ActivityFeed.Row>
 
-    init(rows: [ActivityFeed.Row], sortOrder: Binding<[KeyPathComparator<ActivityFeed.Row>]>) {
+    init(rows: [ActivityFeed.Row], sortOrder: Binding<[KeyPathComparator<ActivityFeed.Row>]>,
+         now: Date) {
         self.rows = rows
         self._sortOrder = sortOrder
+        self.now = now
         if let data = UserDefaults.standard.data(forKey: ActivityColumnStore.defaultsKey),
            let saved = try? JSONDecoder().decode(
                TableColumnCustomization<ActivityFeed.Row>.self, from: data) {
@@ -281,7 +294,7 @@ private struct CustomizableFeedTable: View {
             .width(min: 60, ideal: 90)
             .customizationID("from")
             TableColumn("Time", value: \.time) { row in
-                TimeCell(time: row.time)
+                TimeCell(time: row.time, now: now)
             }
             .width(min: 70, ideal: 90)
             .customizationID("time")
@@ -301,6 +314,7 @@ private struct CustomizableFeedTable: View {
 private struct LegacyFeedTable: View {
     let rows: [ActivityFeed.Row]
     @Binding var sortOrder: [KeyPathComparator<ActivityFeed.Row>]
+    let now: Date
 
     var body: some View {
         Table(rows, sortOrder: $sortOrder) {
@@ -332,7 +346,7 @@ private struct LegacyFeedTable: View {
             }
             .width(min: 60, ideal: 90)
             TableColumn("Time", value: \.time) { row in
-                TimeCell(time: row.time)
+                TimeCell(time: row.time, now: now)
             }
             .width(min: 70, ideal: 90)
         }
@@ -425,14 +439,13 @@ private struct StatusGlyph: View {
 
 private struct TimeCell: View {
     let time: Date
+    /// Supplied by the view-level minute clock — cells are deliberately
+    /// timer-free (see the body comment in ActivityView).
+    let now: Date
 
     var body: some View {
-        // Coarse "… ago", kept live by the minute — same treatment as the
-        // Settings cards' "Last checked" line.
-        TimelineView(.periodic(from: .now, by: 60)) { context in
-            Text(RelativeTime.ago(time, now: context.date))
-                .foregroundStyle(.secondary)
-        }
+        Text(RelativeTime.ago(time, now: now))
+            .foregroundStyle(.secondary)
     }
 }
 

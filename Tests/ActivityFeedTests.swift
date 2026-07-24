@@ -40,9 +40,8 @@ struct ActivityFeedTests {
 
     /// Wait until the feed's loop is live (cursor + seed done, long-poll
     /// issued) — pushes before that land behind the cursor and vanish.
-    private func waitUntilPolling(_ server: FakeSyncthingServer,
-                                  beyond priorPolls: Int = 0) async throws {
-        try await expectEventually { pollCount(server) > priorPolls }
+    private func waitUntilPolling(_ server: FakeSyncthingServer) async throws {
+        try await expectEventually { pollCount(server) > 0 }
     }
 
     // MARK: Outbound journey
@@ -271,10 +270,14 @@ struct ActivityFeedTests {
         #expect(feed.rows[1].state == .pending)
 
         // Session republish → loop restarts; rows are kept, history is not
-        // re-applied (no duplicates).
-        let polls = pollCount(server)
+        // re-applied (no duplicates). Poll counts can't signal the restart
+        // (the cancelled loop's final in-flight poll also counts); the NEW
+        // loop's myID call — made strictly AFTER its cursor is established —
+        // is the deterministic marker that pushes are now safe.
+        let statusCalls = { server.requestedPaths.filter { $0 == "/rest/system/status" }.count }
+        let before = statusCalls()
         feed.connect(api: api(for: server))
-        try await waitUntilPolling(server, beyond: polls)
+        try await expectEventually { statusCalls() > before }
         server.pushEvent(type: "LocalChangeDetected",
                          data: ["folder": "f1", "path": "live.txt", "action": "modified"])
         try await expectEventually { feed.rows.contains { $0.path == "live.txt" } }
