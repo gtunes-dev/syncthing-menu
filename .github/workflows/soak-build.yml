@@ -100,9 +100,16 @@ jobs:
           echo "zip=build/SyncthingMenu-${RELEASE_VERSION}.zip" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
+        # The artifact downloads as GitHub's zip WRAPPER around our zip
+        # (inherent to Actions artifacts; the app must be zipped first anyway
+        # — upload-artifact drops permissions/symlinks, which would break the
+        # bundle and its signature). The artifact name becomes the wrapper's
+        # filename, so it must differ from the zip it contains: a same-named
+        # zip-inside-a-zip trips Archive Utility (extraction collisions that
+        # read as a corrupt file — seen on the first soak build).
         uses: actions/upload-artifact@v4
         with:
-          name: SyncthingMenu-${{ steps.ver.outputs.version }}
+          name: soak-${{ steps.ver.outputs.version }}
           path: ${{ steps.build.outputs.zip }}
           retention-days: 14
           if-no-files-found: error
