@@ -18,7 +18,7 @@ import Foundation
 /// -----------|---------------------------|-----------|-------------------------------------|------------------------
 /// pending    | clock                     | outbound  | LocalChangeDetected (modify OR delete) | uploading, synced, superseded
 /// uploading  | arrow.triangle.2.circlepath | outbound | RemoteDownloadProgress names the path | synced, superseded, pending (stale ~15s)
-/// synced     | arrow.up                  | outbound  | FolderCompletion watermark (≥1 dev) | —
+/// synced     | arrow.up                  | outbound  | FolderCompletion full catch-up (≥1 dev) | —
 /// superseded | clock.badge.xmark         | outbound  | newer episode for same path         | —
 /// syncing    | arrow.triangle.2.circlepath | inbound | ItemStarted                         | applied, failed
 /// applied    | arrow.down                | inbound   | ItemFinished ok; RemoteChangeDetected stamps origin | —
@@ -36,13 +36,15 @@ import Foundation
 /// - "synced" means delivered to AT LEAST ONE remote device (the change
 ///   survives losing this machine) — not cluster-wide convergence. Local
 ///   DELETES travel the same pending→synced journey (tombstone delivery).
-/// - The delivery watermark: LocalIndexUpdated stamps pending rows with the
-///   folder's index `sequence`; a FolderCompletion from any remote device
-///   flips pending rows at/below its `sequence` (or all of them when the
-///   device reports completion 100 / needItems 0). No per-file upload event
-///   exists — this is the honest substitute, and it costs zero extra requests.
-/// - Rows seeded from `/rest/events/disk` history enter with no sequence;
-///   they only flip on a full catch-up (completion == 100).
+/// - Delivery is confirmed at FOLDER granularity: a FolderCompletion from
+///   any remote device reporting full catch-up (completion == 100 AND
+///   needItems == 0) flips every awaiting row in the folder. No per-file
+///   upload event exists, and FolderCompletion.sequence lives in the REMOTE
+///   device's own number-space (verified live 2026-07-24) — a cross-device
+///   sequence comparison is unsound and was removed. Rows therefore flip
+///   together when a peer finishes the folder, not per-file as items land;
+///   per-file truth would require /rest/db/remoteneed queries (deliberately
+///   not built).
 /// - Inbound rows don't know their origin until the commit event lands —
 ///   the Origin column shows "—" while a download is in flight.
 ///
@@ -96,10 +98,6 @@ final class ActivityFeed: ObservableObject {
         var origin: String?
         /// Episode still expects events (started → finished → committed).
         var episodeOpen: Bool
-        /// Folder index sequence this local change committed at (stamped by
-        /// LocalIndexUpdated) — the delivery watermark comparand. nil until
-        /// stamped (or for seeded/remote rows).
-        var sequence: Int64?
         /// When RemoteDownloadProgress last confirmed the uploading state —
         /// there is no end event, so staleness (see `uploadStaleAfter`)
         /// reverts uploading → pending.
@@ -263,9 +261,6 @@ final class ActivityFeed: ObservableObject {
     /// doc — this function IS that table's transition column.
     private func apply(_ event: SyncthingAPI.ActivityEvent, to rows: inout [Row]) {
         switch event.type {
-        case "LocalIndexUpdated":
-            stampSequences(event, in: &rows)
-            return
         case "FolderCompletion":
             applyWatermark(event, to: &rows)
             return
@@ -306,7 +301,7 @@ final class ActivityFeed: ObservableObject {
             supersedePending()
             insert(Row(time: event.time, folderID: folder, folderLabel: label, path: path,
                        isLocalOrigin: false, operation: operation, state: .syncing,
-                       origin: nil, episodeOpen: true, sequence: nil))
+                       origin: nil, episodeOpen: true))
 
         case "ItemFinished":
             let state: Row.JourneyState = event.error.map { .failed($0) } ?? .applied
@@ -321,7 +316,7 @@ final class ActivityFeed: ObservableObject {
                 supersedePending()
                 insert(Row(time: event.time, folderID: folder, folderLabel: label, path: path,
                            isLocalOrigin: false, operation: operation, state: state,
-                           origin: nil, episodeOpen: event.error == nil, sequence: nil))
+                           origin: nil, episodeOpen: event.error == nil))
             }
 
         case "RemoteChangeDetected":
@@ -338,7 +333,7 @@ final class ActivityFeed: ObservableObject {
                 supersedePending()
                 insert(Row(time: event.time, folderID: folder, folderLabel: label, path: path,
                            isLocalOrigin: false, operation: operation, state: .applied,
-                           origin: origin, episodeOpen: false, sequence: nil))
+                           origin: origin, episodeOpen: false))
             }
 
         case "LocalChangeDetected":
@@ -347,25 +342,10 @@ final class ActivityFeed: ObservableObject {
             supersedePending()
             insert(Row(time: event.time, folderID: folder, folderLabel: label, path: path,
                        isLocalOrigin: true, operation: operation, state: .pending,
-                       origin: nil, episodeOpen: false, sequence: nil))
+                       origin: nil, episodeOpen: false))
 
         default:
             break
-        }
-    }
-
-    /// LocalIndexUpdated: the scanner/puller committed a batch ending at
-    /// `sequence`; `filenames` lists the batch. Stamp matching unstamped
-    /// pending rows — the batch sequence is ≥ each member's own, so the
-    /// watermark comparison stays conservative (never flips early).
-    private func stampSequences(_ event: SyncthingAPI.ActivityEvent, in rows: inout [Row]) {
-        guard let folder = event.folder, let sequence = event.sequence,
-              let filenames = event.filenames else { return }
-        let names = Set(filenames)
-        for index in rows.indices
-        where rows[index].state.isAwaitingDelivery && rows[index].sequence == nil
-            && rows[index].folderID == folder && names.contains(rows[index].path) {
-            rows[index].sequence = sequence
         }
     }
 
@@ -397,36 +377,23 @@ final class ActivityFeed: ObservableObject {
         }
     }
 
-    /// FolderCompletion (per remote device): flip awaiting rows the reporting
-    /// device has provably received — sequence at/past the row's watermark, or
-    /// a full catch-up (which also covers seedless rows). "Synced" is
-    /// delivered-to-at-least-one, so the first qualifying device flips a row.
+    /// FolderCompletion (per remote device): a full catch-up proves every
+    /// awaiting change in the folder was delivered — flip them. "Synced" is
+    /// delivered-to-at-least-one, so the first caught-up device flips rows.
     private func applyWatermark(_ event: SyncthingAPI.ActivityEvent, to rows: inout [Row]) {
         guard let folder = event.folder, let device = event.device,
-              device != myID else { return }
-        let caughtUp = event.completion == 100 && event.needItems == 0
-        let deviceSequence = event.sequence
+              device != myID,
+              event.completion == 100, event.needItems == 0 else { return }
         var flipped = 0
         for index in rows.indices where rows[index].state.isAwaitingDelivery
             && rows[index].folderID == folder {
-            let delivered: Bool = if caughtUp {
-                true
-            } else if let deviceSequence, let rowSequence = rows[index].sequence {
-                deviceSequence >= rowSequence
-            } else {
-                false
-            }
-            if delivered {
-                rows[index].state = .synced
-                rows[index].time = event.time
-                rows[index].uploadRefreshedAt = nil
-                flipped += 1
-            }
+            rows[index].state = .synced
+            rows[index].time = event.time
+            rows[index].uploadRefreshedAt = nil
+            flipped += 1
         }
-        // Verification aid for the sequence-semantics assumption (see class
-        // doc): correlate flips against real syncs in the unified log.
         if flipped > 0 {
-            Log.monitor.log("activity watermark: \(flipped) rows synced (device seq \(deviceSequence.map(String.init) ?? "nil", privacy: .public), caughtUp \(caughtUp))")
+            Log.monitor.log("activity watermark: \(flipped) rows synced (full catch-up)")
         }
     }
 

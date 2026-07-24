@@ -16,7 +16,7 @@ struct ActivityDisplayTests {
         ActivityFeed.Row(time: Date(timeIntervalSince1970: 0), folderID: "f",
                          folderLabel: "F", path: path, isLocalOrigin: isLocal,
                          operation: op, state: state, origin: origin,
-                         episodeOpen: false, sequence: nil, uploadRefreshedAt: nil)
+                         episodeOpen: false, uploadRefreshedAt: nil)
     }
 
     // MARK: Filter predicate

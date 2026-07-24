@@ -225,9 +225,8 @@ struct SyncthingAPI: Equatable {
     /// ItemStarted/ItemFinished carry the path as `item` with `action`
     /// update/metadata/delete; the disk-change events carry it as `path` with
     /// `action` modified/deleted plus `label` and `modifiedBy` (the short id
-    /// of the device that originated the change). LocalIndexUpdated carries
-    /// `filenames` + the batch's closing `sequence`; FolderCompletion carries
-    /// `device`, `completion`, `needItems`, `sequence` (per remote device).
+    /// of the device that originated the change). FolderCompletion carries
+    /// `device`, `completion`, `needItems` (per remote device).
     struct ActivityEvent: Decodable {
         let id: Int
         let type: String
@@ -242,10 +241,8 @@ struct SyncthingAPI: Equatable {
         let modifiedBy: String?
         let error: String?
         let device: String?
-        let sequence: Int64?
         let completion: Double?
         let needItems: Int?
-        let filenames: [String]?
         /// RemoteDownloadProgress: the paths the remote device is actively
         /// downloading (the keys of its `state` block-count map).
         let downloadingPaths: [String]?
@@ -253,7 +250,7 @@ struct SyncthingAPI: Equatable {
         private enum CodingKeys: String, CodingKey { case id, type, time, data }
         private enum DataKeys: String, CodingKey {
             case folder, label, path, item, action, type, modifiedBy, error
-            case device, sequence, completion, needItems, filenames, state
+            case device, completion, needItems, state
         }
 
         init(from decoder: Decoder) throws {
@@ -271,17 +268,15 @@ struct SyncthingAPI: Equatable {
                 modifiedBy = try? data.decodeIfPresent(String.self, forKey: .modifiedBy)
                 error = try? data.decodeIfPresent(String.self, forKey: .error)
                 device = try? data.decodeIfPresent(String.self, forKey: .device)
-                sequence = try? data.decodeIfPresent(Int64.self, forKey: .sequence)
                 completion = try? data.decodeIfPresent(Double.self, forKey: .completion)
                 needItems = try? data.decodeIfPresent(Int.self, forKey: .needItems)
-                filenames = try? data.decodeIfPresent([String].self, forKey: .filenames)
                 downloadingPaths = (try? data.decodeIfPresent([String: Int].self, forKey: .state))
                     .map { Array($0.keys) }
             } else {
                 folder = nil; label = nil; path = nil; action = nil
                 itemKind = nil; modifiedBy = nil; error = nil
-                device = nil; sequence = nil; completion = nil; needItems = nil
-                filenames = nil; downloadingPaths = nil
+                device = nil; completion = nil; needItems = nil
+                downloadingPaths = nil
             }
         }
 
@@ -309,13 +304,12 @@ struct SyncthingAPI: Equatable {
     /// distinct filter (thus a distinct server-side subscription) decoding the
     /// richer change-lifecycle payloads. The disk-change events must be named
     /// explicitly: they are excluded from the default event mask.
-    /// LocalIndexUpdated + FolderCompletion drive the delivery watermark for
-    /// local changes; RemoteDownloadProgress marks pending rows a remote is
-    /// actively fetching (see `ActivityFeed`).
+    /// FolderCompletion drives delivery confirmation for local changes;
+    /// RemoteDownloadProgress marks pending rows a remote is actively
+    /// fetching (see `ActivityFeed`).
     static let activityEventTypes = ["LocalChangeDetected", "RemoteChangeDetected",
                                      "ItemStarted", "ItemFinished",
-                                     "LocalIndexUpdated", "FolderCompletion",
-                                     "RemoteDownloadProgress"]
+                                     "FolderCompletion", "RemoteDownloadProgress"]
 
     func activityEvents(since: Int, timeout: Int, limit: Int? = nil) async throws -> [ActivityEvent] {
         var query = "since=\(since)&timeout=\(timeout)&events=\(Self.activityEventTypes.joined(separator: ","))"

@@ -40,25 +40,15 @@ struct ActivityEventDecodingTests {
         #expect(event.modifiedBy == "REMOTE7")
     }
 
-    @Test func localIndexUpdatedCarriesBatchAndSequence() throws {
-        let event = try decode([
-            "id": 9, "type": "LocalIndexUpdated", "time": "2026-07-23T10:00:00Z",
-            "data": ["folder": "f1", "filenames": ["a.txt", "b.txt"], "sequence": 4242],
-        ])
-        #expect(event.filenames == ["a.txt", "b.txt"])
-        #expect(event.sequence == 4242)
-    }
-
     @Test func folderCompletionCarriesWatermarkFields() throws {
         let event = try decode([
             "id": 10, "type": "FolderCompletion", "time": "2026-07-23T10:00:00Z",
             "data": ["folder": "f1", "device": "REMOTE7-FULL-ID", "completion": 100,
-                     "needItems": 0, "sequence": 4242],
+                     "needItems": 0],
         ])
         #expect(event.device == "REMOTE7-FULL-ID")
         #expect(event.completion == 100)
         #expect(event.needItems == 0)
-        #expect(event.sequence == 4242)
     }
 
     /// The `state` block-count map flattens to just its keys — the paths a

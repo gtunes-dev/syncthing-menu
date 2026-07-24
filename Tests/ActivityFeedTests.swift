@@ -74,9 +74,11 @@ struct ActivityFeedTests {
         #expect(feed.rows.allSatisfy { $0.isLocalOrigin && $0.folderLabel == "Folder One" })
     }
 
-    /// LocalIndexUpdated stamps the folder sequence; a remote device's
-    /// FolderCompletion flips rows at/below its sequence — but not below.
-    @Test func watermarkFlipsStampedRowsAtSequence() async throws {
+    /// Delivery is confirmed at folder granularity: partial progress from a
+    /// remote must NOT flip rows; its full catch-up flips every awaiting row.
+    /// (FolderCompletion.sequence lives in the remote's own number-space —
+    /// verified live 2026-07-24 — so no per-file sequence comparison exists.)
+    @Test func watermarkFlipsOnlyOnFullCatchUp() async throws {
         let server = try standardServer()
         defer { server.stop() }
         let feed = makeFeed()
@@ -87,12 +89,10 @@ struct ActivityFeedTests {
 
         server.pushEvent(type: "LocalChangeDetected",
                          data: ["folder": "f1", "path": "a.txt", "action": "modified"])
-        server.pushEvent(type: "LocalIndexUpdated",
-                         data: ["folder": "f1", "filenames": ["a.txt"], "sequence": 42])
-        // Below the stamp: must NOT flip. The marker row proves processing.
+        // Partial progress: must NOT flip. The marker row proves processing.
         server.pushEvent(type: "FolderCompletion",
                          data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
-                                "completion": 50, "needItems": 3, "sequence": 41])
+                                "completion": 50, "needItems": 3])
         server.pushEvent(type: "LocalChangeDetected",
                          data: ["folder": "f1", "path": "marker.txt", "action": "modified"])
         try await expectEventually { feed.rows.count == 2 }
@@ -100,15 +100,14 @@ struct ActivityFeedTests {
 
         server.pushEvent(type: "FolderCompletion",
                          data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
-                                "completion": 90, "needItems": 1, "sequence": 42])
+                                "completion": 100, "needItems": 0])
         try await expectEventually {
-            feed.rows.first { $0.path == "a.txt" }?.state == .synced
+            feed.rows.allSatisfy { $0.state == .synced }
         }
     }
 
-    /// A FolderCompletion claiming to be ourselves must not flip anything;
-    /// a remote's full catch-up flips even unstamped rows.
-    @Test func watermarkIgnoresSelfAndFlipsOnCatchUp() async throws {
+    /// A FolderCompletion claiming to be ourselves must not flip anything.
+    @Test func watermarkIgnoresSelf() async throws {
         let server = try standardServer()
         defer { server.stop() }
         let feed = makeFeed()
@@ -121,18 +120,11 @@ struct ActivityFeedTests {
                          data: ["folder": "f1", "path": "a.txt", "action": "modified"])
         server.pushEvent(type: "FolderCompletion",
                          data: ["folder": "f1", "device": "SELF",
-                                "completion": 100, "needItems": 0, "sequence": 99])
+                                "completion": 100, "needItems": 0])
         server.pushEvent(type: "LocalChangeDetected",
                          data: ["folder": "f1", "path": "marker.txt", "action": "modified"])
         try await expectEventually { feed.rows.count == 2 }
         #expect(feed.rows.first { $0.path == "a.txt" }?.state == .pending)
-
-        server.pushEvent(type: "FolderCompletion",
-                         data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
-                                "completion": 100, "needItems": 0])
-        try await expectEventually {
-            feed.rows.allSatisfy { $0.state == .synced }
-        }
     }
 
     /// RemoteDownloadProgress marks a pending row uploading; without
