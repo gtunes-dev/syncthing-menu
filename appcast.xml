@@ -3,6 +3,22 @@
     <channel>
         <title>SyncthingMenu</title>
         <item>
+            <title>0.3.0</title>
+            <pubDate>Sat, 25 Jul 2026 17:42:16 +0000</pubDate>
+            <sparkle:version>68</sparkle:version>
+            <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://gtunes-dev.github.io/syncthing-menu/SyncthingMenu-0.3.0.md</sparkle:releaseNotesLink>
+            <enclosure url="https://gtunes-dev.github.io/syncthing-menu/SyncthingMenu-0.3.0.zip" length="4616076" type="application/octet-stream" sparkle:edSignature="KxBjZ6TZZY88xJcdySuo5btByEO7z0DMHwNsan7K/jzR/7sOvdQ5HForTCcA3tab1dt+VB5cS4HePsq5OLgeDA=="/>
+            <sparkle:deltas>
+                <enclosure url="https://gtunes-dev.github.io/syncthing-menu/Syncthing%20Menu68-61.delta" sparkle:deltaFrom="61" length="235038" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980464" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="lbkfePS0bYjkQ/szj2kuFHmM7p4Opy32DQKULb1AInc0msuYhTpQq81DtouEzumwi0V2lAGANF5hhVukgOcYBg=="/>
+                <enclosure url="https://gtunes-dev.github.io/syncthing-menu/Syncthing%20Menu68-59.delta" sparkle:deltaFrom="59" length="243642" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980464" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="m/ioevzQu/TFZCY8nXd1qNH3GLkJVvSYU35qdVGBtJ5XpAngNKiAiQTPpmEWlu3Y8jo4Xb6lQvB5/47tQpWTCw=="/>
+                <enclosure url="https://gtunes-dev.github.io/syncthing-menu/Syncthing%20Menu68-46.delta" sparkle:deltaFrom="46" length="295670" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980464" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="oUSCwmGQ/j6w6SATPzn2JcsnNvJL1WstiiMDWykVEn3FAPLQXDwKL/0AGChguUzpWbcU4Ox1bU+6KNsPuLbKDg=="/>
+                <enclosure url="https://gtunes-dev.github.io/syncthing-menu/Syncthing%20Menu68-44.delta" sparkle:deltaFrom="44" length="294954" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980464" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="ZjNHT/D0sO3jGMgFz68yjEnBHR9X8Y8j97oG+Nz7633108EouQpPmsco7Dg94CdoVjqvVXVEFPEcqG0EKPSfDg=="/>
+                <enclosure url="https://gtunes-dev.github.io/syncthing-menu/Syncthing%20Menu68-42.delta" sparkle:deltaFrom="42" length="305498" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980464" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="jsg+UYGABqmCw2s/qvdIPFeXl3FBAgnC5GtdeEkPV13AHXamLDiQQXZmykQh+tWywvSNZS2UFPGxzfSdkWWyDQ=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>0.2.1</title>
             <pubDate>Fri, 17 Jul 2026 06:08:41 +0000</pubDate>
             <sparkle:version>61</sparkle:version>
@@ -32,22 +48,6 @@
                 <enclosure url="https://gtunes-dev.github.io/syncthing-menu/Syncthing%20Menu59-42.delta" sparkle:deltaFrom="42" length="173434" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980464" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="vKebC4rAM1gpzv+NkilneXMlnZKTkBVel2uUBU9xpDdrHZAQLAh9WFBsO/mgnd/RdclaCmDYPnBEFhZkzuVBBw=="/>
                 <enclosure url="https://gtunes-dev.github.io/syncthing-menu/Syncthing%20Menu59-40.delta" sparkle:deltaFrom="40" length="251222" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980464" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="ksRtIOH8BDCIh6JevHXRM1C2D01Zyz2DvUmivmCNjdEWCDLWHf6C0/yH7WQBv8RH0RUXLwSmw3IsZJapid7kDQ=="/>
                 <enclosure url="https://gtunes-dev.github.io/syncthing-menu/Syncthing%20Menu59-38.delta" sparkle:deltaFrom="38" length="251514" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980464" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="KwfYNW2nFEMARdkIfHWNxiSRtQqwjkjBu8POjstquV/dUH8XdXlrE2HEhLZzbUKzT3oq3qN4uPOdG0IxAqASCA=="/>
-            </sparkle:deltas>
-        </item>
-        <item>
-            <title>0.1.8</title>
-            <pubDate>Thu, 09 Jul 2026 16:30:02 +0000</pubDate>
-            <sparkle:version>46</sparkle:version>
-            <sparkle:shortVersionString>0.1.8</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-            <sparkle:releaseNotesLink>https://gtunes-dev.github.io/syncthing-menu/SyncthingMenu-0.1.8.md</sparkle:releaseNotesLink>
-            <enclosure url="https://gtunes-dev.github.io/syncthing-menu/SyncthingMenu-0.1.8.zip" length="4441147" type="application/octet-stream" sparkle:edSignature="CoU2UZ0KNrWaNv4NE2TMXM9Yn++wPvuwdmBCuJ6/eelQqwUKezfWvXQse2inU0GL7uYhrpMwxIe5ZoxlUiPiAA=="/>
-            <sparkle:deltas>
-                <enclosure url="https://gtunes-dev.github.io/syncthing-menu/Syncthing%20Menu46-44.delta" sparkle:deltaFrom="44" length="37986" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980464" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="IqxpvZTfYvm/gpOKndGH+19NAYot/LfeEy3OQzAnx4tGOhMg3TZJBIb/1owZUhaB86iC3K0/8ROvUaehhF2rBg=="/>
-                <enclosure url="https://gtunes-dev.github.io/syncthing-menu/Syncthing%20Menu46-42.delta" sparkle:deltaFrom="42" length="88346" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980464" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="/B9J6SVmTBpXaAQ81FLn7nU59pzcRt5x2Y+UZneRjmcTvjH50EjIGnFV7PpZg0gYSboutyqg6FPLTh7OCEq0Bw=="/>
-                <enclosure url="https://gtunes-dev.github.io/syncthing-menu/Syncthing%20Menu46-40.delta" sparkle:deltaFrom="40" length="174922" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980464" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="SgWfZpkXChUZZBPeWv9ggZLnAGTKPDeNj1fzWUhCATTLJ4ZV1ubls9ghU4+x0X9uRFX17jIE1U0aXf98DyI1CQ=="/>
-                <enclosure url="https://gtunes-dev.github.io/syncthing-menu/Syncthing%20Menu46-38.delta" sparkle:deltaFrom="38" length="176126" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980464" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="8cXCSjly+WBBSrOTVM5GRVzAwQaCdke5Z/rkkjb305lTC+r9QGoMmEcsQ+sOEW/JpVv/0pV/XHYxVfSRYUCEDQ=="/>
-                <enclosure url="https://gtunes-dev.github.io/syncthing-menu/Syncthing%20Menu46-35.delta" sparkle:deltaFrom="35" length="236430" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980464" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="lqhGuUenQnIllcVdjkImYXYoqX3USNrwuinLC8T3sma4Z8DLEgFdxMKLSCWEqlOH5sXaRIgfPyf0/FhPBy6CDA=="/>
             </sparkle:deltas>
         </item>
     </channel>
