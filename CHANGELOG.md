@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-03
+
 ### Changed
 - Activity window rows are now marked "synced" individually, as each file reaches another device — not all at once when a device fully catches up.
 
