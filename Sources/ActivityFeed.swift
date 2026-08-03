@@ -18,7 +18,7 @@ import Foundation
 /// -----------|---------------------------|-----------|-------------------------------------|------------------------
 /// pending    | clock                     | outbound  | LocalChangeDetected (modify OR delete) | uploading, synced, superseded
 /// uploading  | arrow.triangle.2.circlepath | outbound | RemoteDownloadProgress names the path | synced, superseded, pending (stale ~15s)
-/// synced     | arrow.up                  | outbound  | FolderCompletion full catch-up (≥1 dev) | —
+/// synced     | arrow.up                  | outbound  | FolderCompletion full catch-up, or absent from remoteneed | —
 /// superseded | clock.badge.xmark         | outbound  | newer episode for same path         | —
 /// syncing    | arrow.triangle.2.circlepath | inbound | ItemStarted                         | applied, failed
 /// applied    | arrow.down                | inbound   | ItemFinished ok; RemoteChangeDetected stamps origin | —
@@ -36,26 +36,28 @@ import Foundation
 /// - "synced" means delivered to AT LEAST ONE remote device (the change
 ///   survives losing this machine) — not cluster-wide convergence. Local
 ///   DELETES travel the same pending→synced journey (tombstone delivery).
-/// - Delivery is confirmed at FOLDER granularity: a FolderCompletion from
-///   any remote device reporting full catch-up (completion == 100 AND
-///   needItems == 0) flips every awaiting row in the folder. No per-file
-///   upload event exists, and FolderCompletion.sequence lives in the REMOTE
-///   device's own number-space (verified live 2026-07-24) — a cross-device
-///   sequence comparison is unsound and was removed. Rows therefore flip
-///   together when a peer finishes the folder, not per-file as items land;
-///   per-file truth would require /rest/db/remoteneed queries (deliberately
-///   not built).
+/// - Delivery is confirmed two ways, both driven by FolderCompletion from a
+///   remote device (never per-row polling). Full catch-up (completion == 100
+///   AND needItems == 0) flips every awaiting row in the folder — zero extra
+///   requests. Partial progress triggers ONE `/rest/db/remoteneed` query for
+///   that (folder, device): awaiting rows ABSENT from the returned need list
+///   are delivered — per-file confirmation, no flip-in-waves. remoteneed is
+///   computed from OUR index, so the comparison is sound; a cross-device
+///   FolderCompletion.sequence comparison is NOT (the sequence lives in the
+///   remote's own number-space, verified live 2026-07-24) and was removed.
+///   Absence is only trusted when the need list is complete (one page):
+///   a truncated list defers to the catch-up path — lag, never lie.
 /// - Inbound rows don't know their origin until the commit event lands —
 ///   the Origin column shows "—" while a download is in flight.
 ///
-/// Frugality contract: the long-poll loop runs ONLY while the Activity window
-/// is visible and the session is connected. Closed window = zero cost; the
-/// daemon's `/rest/events/disk` ring provides history to seed from on open.
-/// Offline peers cost nothing: watermark flips are driven by events arriving
-/// on the same parked long-poll, never by per-row queries.
-///
-/// Main-thread confined, like `SyncthingMonitor`: the poll task is @MainActor,
-/// awaits run the network work off-main, all state mutation stays on main.
+/// Frugality contract: the long-poll loop (`EventStream` — stream mechanics
+/// live there) runs ONLY while the Activity window is visible and the session
+/// is connected. Closed window = zero cost; the daemon's `/rest/events/disk`
+/// ring provides history to seed from on open. Offline peers cost nothing:
+/// they emit no FolderCompletion, so neither delivery path runs for them —
+/// confirmation is event-gated (at most one bounded remoteneed query per
+/// FolderCompletion, and only while awaiting rows exist in that folder),
+/// never timer-driven or per-row.
 @MainActor
 final class ActivityFeed: ObservableObject {
     struct Row: Identifiable, Equatable {
@@ -135,7 +137,6 @@ final class ActivityFeed: ObservableObject {
     /// readout, not a log archive.
     @Published private(set) var rows: [Row] = []
 
-    private static let pollTimeout = 50
     private static let maxRows = 500
     private static let historySeed = 100
     /// 3 missed RemoteDownloadProgress cadences (~5s each): the transfer
@@ -148,12 +149,13 @@ final class ActivityFeed: ObservableObject {
 
     /// Injectable seams (the monitor's established pattern): tests exercise
     /// the retry path and the upload-staleness clock without real time.
+    /// `retrySleep` is handed to the stream at loop start.
     var retrySleep: (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) }
     var now: () -> Date = Date.init
 
     private var api: SyncthingAPI?
     private var windowVisible = false
-    private var task: Task<Void, Never>?
+    private var stream: EventStream<SyncthingAPI.ActivityEvent>?
     /// Folder id → display label, refreshed at each loop (re)start; the item
     /// events carry only the folder id.
     private var folderLabels: [String: String] = [:]
@@ -183,76 +185,62 @@ final class ActivityFeed: ObservableObject {
         if visible { startLoop() } else { stopLoop() }
     }
 
+    /// No endpoint-suspect escalation on this stream — `SyncthingMonitor` is
+    /// the session's health probe; if the daemon is really gone the session
+    /// flips unavailable and disconnects us, so this stream retries forever.
     private func startLoop() {
         guard let api else { return }
         stopLoop()
-        task = Task { @MainActor in await self.run(api: api) }
-    }
-
-    private func stopLoop() {
-        task?.cancel()
-        task = nil
-    }
-
-    @MainActor
-    private func run(api: SyncthingAPI) async {
-        var since = 0
-        var needsSetup = true
-        while !Task.isCancelled {
-            do {
-                if needsSetup {
-                    // Cursor first (also creates the server-side subscription);
-                    // a change landing during the seed has an id past the
-                    // cursor and arrives in the first long-poll — no gap.
-                    since = try await api.activityEvents(since: 0, timeout: 1, limit: 1)
-                        .last?.id ?? 0
-                    folderLabels = Dictionary(uniqueKeysWithValues: (try await api.folders())
-                        .map { ($0.id, $0.label.isEmpty ? $0.id : $0.label) })
-                    let devices = try await api.devices()
-                    deviceNames = Dictionary(uniqueKeysWithValues: devices.map {
-                        (String($0.deviceID.prefix(7)),
-                         ($0.name?.isEmpty ?? true) ? String($0.deviceID.prefix(7)) : $0.name!)
-                    })
-                    myID = try await api.myID()
-                    // Seed display history only when starting empty (first open
-                    // this daemon-session); a reconnect keeps what's shown
-                    // rather than risking duplicate rows.
-                    if rows.isEmpty {
-                        seedHistory(try await api.diskEvents(limit: Self.historySeed))
-                    }
-                    needsSetup = false
+        let stream = EventStream<SyncthingAPI.ActivityEvent>(
+            label: "activity",
+            fetch: { try await api.activityEvents(since: $0, timeout: $1, limit: $2) },
+            seed: { [weak self] in
+                guard let self else { return }
+                self.folderLabels = Dictionary(uniqueKeysWithValues: (try await api.folders())
+                    .map { ($0.id, $0.label.isEmpty ? $0.id : $0.label) })
+                let devices = try await api.devices()
+                self.deviceNames = Dictionary(uniqueKeysWithValues: devices.map {
+                    (String($0.deviceID.prefix(7)),
+                     ($0.name?.isEmpty ?? true) ? String($0.deviceID.prefix(7)) : $0.name!)
+                })
+                self.myID = try await api.myID()
+                // Seed display history only when starting empty (first open
+                // this daemon-session); a reconnect keeps what's shown
+                // rather than risking duplicate rows.
+                if self.rows.isEmpty {
+                    self.seedHistory(try await api.diskEvents(limit: Self.historySeed))
                 }
-                let events = try await api.activityEvents(since: since,
-                                                          timeout: Self.pollTimeout)
-                guard !Task.isCancelled else { return }
-                if let first = events.first, since > 0, first.id > since + 1 {
-                    // Ring overflow: the daemon buffers 1000 events per
-                    // subscription and we fell behind. Rows between are lost;
-                    // the feed continues from here. (A visible discontinuity
-                    // marker is a candidate refinement.)
-                    Log.monitor.log("activity stream missed \(first.id - since - 1) events")
-                }
-                var updated = rows
+            },
+            handle: { [weak self] events in
+                guard let self else { return }
+                var updated = self.rows
+                var triggers: Set<DeliveryTrigger> = []
                 for event in events {
-                    since = max(since, event.id)
-                    apply(event, to: &updated)
+                    self.apply(event, to: &updated)
+                    // Partial catch-up progress is the per-file confirmation
+                    // trigger (full catch-up already flipped in apply). One
+                    // set entry per (folder, device) however many completion
+                    // ticks the batch carried.
+                    if event.type == "FolderCompletion",
+                       let folder = event.folder, let device = event.device,
+                       device != self.myID {
+                        triggers.insert(DeliveryTrigger(folder: folder, device: device))
+                    }
                 }
                 // Every wake (including empty ~50s timeouts) sweeps stale
                 // uploading rows back to pending — there's no end event.
-                revertStaleUploads(&updated)
-                commit(updated)
-            } catch {
-                guard !Task.isCancelled else { return }
-                // Daemon unreachable or mid-restart: event ids reset with the
-                // worker, so drop the cursor and rebuild. No endpoint-suspect
-                // escalation here — SyncthingMonitor is the session's health
-                // probe; if the daemon is really gone the session flips
-                // unavailable and disconnects us.
-                since = 0
-                needsSetup = true
-                await retrySleep(2_000_000_000)
-            }
-        }
+                self.revertStaleUploads(&updated)
+                await self.confirmDeliveries(triggers, api: api, rows: &updated)
+                self.commit(updated)
+            })
+        stream.retrySleep = retrySleep
+        self.stream = stream
+        stream.start()
+    }
+
+    private func stopLoop() {
+        stream?.stop()
+        stream = nil
     }
 
     // MARK: - Row lifecycle
@@ -377,9 +365,45 @@ final class ActivityFeed: ObservableObject {
         }
     }
 
+    /// A (folder, device) pair whose FolderCompletion moved this batch — the
+    /// cue to ask remoteneed which awaiting rows that device still lacks.
+    private struct DeliveryTrigger: Hashable {
+        let folder: String
+        let device: String
+    }
+
+    /// Per-file delivery confirmation: for each triggering (folder, device),
+    /// one bounded remoteneed query — awaiting rows absent from the complete
+    /// need list were delivered to that device. Skips folders with nothing
+    /// awaiting; skips silently on query failure or a truncated list (rows
+    /// stay awaiting until the folder-level catch-up — lag, never lie).
+    private func confirmDeliveries(_ triggers: Set<DeliveryTrigger>,
+                                   api: SyncthingAPI, rows: inout [Row]) async {
+        for trigger in triggers {
+            guard rows.contains(where: { $0.state.isAwaitingDelivery
+                    && $0.folderID == trigger.folder }) else { continue }
+            guard let need = try? await api.remoteNeed(folder: trigger.folder,
+                                                       device: trigger.device),
+                  need.complete else { continue }
+            var flipped = 0
+            for index in rows.indices where rows[index].state.isAwaitingDelivery
+                && rows[index].folderID == trigger.folder
+                && !need.needed.contains(rows[index].path) {
+                rows[index].state = .synced
+                rows[index].time = now()
+                rows[index].uploadRefreshedAt = nil
+                flipped += 1
+            }
+            if flipped > 0 {
+                Log.monitor.log("activity remoteneed: \(flipped) rows confirmed by \(trigger.device.prefix(7), privacy: .public)")
+            }
+        }
+    }
+
     /// FolderCompletion (per remote device): a full catch-up proves every
-    /// awaiting change in the folder was delivered — flip them. "Synced" is
-    /// delivered-to-at-least-one, so the first caught-up device flips rows.
+    /// awaiting change in the folder was delivered — flip them, no query
+    /// needed. "Synced" is delivered-to-at-least-one, so the first caught-up
+    /// device flips rows. Partial progress is handled by `confirmDeliveries`.
     private func applyWatermark(_ event: SyncthingAPI.ActivityEvent, to rows: inout [Row]) {
         guard let folder = event.folder, let device = event.device,
               device != myID,

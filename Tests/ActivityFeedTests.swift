@@ -74,10 +74,10 @@ struct ActivityFeedTests {
         #expect(feed.rows.allSatisfy { $0.isLocalOrigin && $0.folderLabel == "Folder One" })
     }
 
-    /// Delivery is confirmed at folder granularity: partial progress from a
-    /// remote must NOT flip rows; its full catch-up flips every awaiting row.
-    /// (FolderCompletion.sequence lives in the remote's own number-space —
-    /// verified live 2026-07-24 — so no per-file sequence comparison exists.)
+    /// The folder-level catch-up path: partial progress alone must NOT
+    /// blanket-flip rows (here the remoteneed query gets a 404 — unscripted —
+    /// so per-file confirmation stays out of the picture); full catch-up
+    /// flips every awaiting row with no query at all.
     @Test func watermarkFlipsOnlyOnFullCatchUp() async throws {
         let server = try standardServer()
         defer { server.stop() }
@@ -104,6 +104,87 @@ struct ActivityFeedTests {
         try await expectEventually {
             feed.rows.allSatisfy { $0.state == .synced }
         }
+    }
+
+    /// Per-file confirmation: partial catch-up progress triggers ONE
+    /// remoteneed query; awaiting rows absent from the (complete) need list
+    /// flip individually while listed rows stay — no flip-in-waves.
+    @Test func remoteNeedConfirmsDeliveredFilesIndividually() async throws {
+        let server = try standardServer()
+        defer { server.stop() }
+        let feed = makeFeed()
+        defer { feed.disconnect() }
+        feed.connect(api: api(for: server))
+        feed.setWindowVisible(true)
+        try await waitUntilPolling(server)
+
+        server.pushEvent(type: "LocalChangeDetected",
+                         data: ["folder": "f1", "path": "a.txt", "action": "modified"])
+        server.pushEvent(type: "LocalChangeDetected",
+                         data: ["folder": "f1", "path": "b.txt", "action": "modified"])
+        try await expectEventually { feed.rows.count == 2 }
+
+        // The peer still needs b.txt; a.txt is absent — delivered.
+        server.setRemoteNeed(folder: "f1", device: "REMOTE7-FULL-ID", names: ["b.txt"])
+        server.pushEvent(type: "FolderCompletion",
+                         data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
+                                "completion": 50, "needItems": 1])
+        try await expectEventually {
+            feed.rows.first { $0.path == "a.txt" }?.state == .synced
+        }
+        #expect(feed.rows.first { $0.path == "b.txt" }?.state == .pending)
+
+        // The query is issued only for triggers with awaiting rows — exactly
+        // one so far.
+        let needQueries = { server.requestedPaths.filter {
+            $0.hasPrefix("/rest/db/remoteneed") }.count }
+        #expect(needQueries() == 1)
+
+        // Nothing awaiting anymore after b.txt confirms → a further partial
+        // tick must not query at all (marker row proves processing).
+        server.setRemoteNeed(folder: "f1", device: "REMOTE7-FULL-ID", names: [])
+        server.pushEvent(type: "FolderCompletion",
+                         data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
+                                "completion": 80, "needItems": 1])
+        try await expectEventually {
+            feed.rows.first { $0.path == "b.txt" }?.state == .synced
+        }
+        let after = needQueries()
+        server.pushEvent(type: "FolderCompletion",
+                         data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
+                                "completion": 90, "needItems": 1])
+        server.pushEvent(type: "LocalChangeDetected",
+                         data: ["folder": "OTHER", "path": "x", "action": "modified"])
+        try await expectEventually { feed.rows.contains { $0.path == "x" } }
+        #expect(needQueries() == after)
+    }
+
+    /// A full (possibly truncated) need page proves nothing about absences:
+    /// no row may flip off it.
+    @Test func truncatedRemoteNeedListIsNotTrusted() async throws {
+        let server = try standardServer()
+        defer { server.stop() }
+        let feed = makeFeed()
+        defer { feed.disconnect() }
+        feed.connect(api: api(for: server))
+        feed.setWindowVisible(true)
+        try await waitUntilPolling(server)
+
+        server.pushEvent(type: "LocalChangeDetected",
+                         data: ["folder": "f1", "path": "a.txt", "action": "modified"])
+        try await expectEventually { feed.rows.count == 1 }
+
+        // files.count == perpage → the page is full; a.txt's absence from it
+        // is meaningless.
+        server.setRemoteNeed(folder: "f1", device: "REMOTE7-FULL-ID",
+                             names: ["other.txt"], perpage: 1)
+        server.pushEvent(type: "FolderCompletion",
+                         data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
+                                "completion": 50, "needItems": 1])
+        server.pushEvent(type: "LocalChangeDetected",
+                         data: ["folder": "f1", "path": "marker.txt", "action": "modified"])
+        try await expectEventually { feed.rows.count == 2 }
+        #expect(feed.rows.first { $0.path == "a.txt" }?.state == .pending)
     }
 
     /// A FolderCompletion claiming to be ourselves must not flip anything.

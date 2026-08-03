@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Activity window rows are now marked "synced" individually, as each file reaches another device — not all at once when a device fully catches up.
+
+### Fixed
+- The menu bar icon now shows Syncing while this Mac is sending changes to other devices, not just receiving them.
+- Brief sync and scan activity no longer flashes the icon too quickly to see — each state stays visible for a few seconds.
+- Pausing a folder no longer freezes the menu bar status.
+
 ## [0.3.0] - 2026-07-25
 
 ### Added

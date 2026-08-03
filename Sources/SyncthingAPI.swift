@@ -98,11 +98,15 @@ struct SyncthingAPI: Equatable {
     // MARK: Folders
 
     /// One configured sync folder. Decoded from `/rest/config/folders`; the many
-    /// other fields in the response are ignored.
+    /// other fields in the response are ignored. `paused` matters beyond
+    /// display: a paused folder is not running, and the per-folder endpoints
+    /// (`/rest/folder/errors`) return 404 "folder is paused" for it —
+    /// verified live 2026-08-03.
     struct Folder: Decodable, Equatable {
         let id: String
         let label: String
         let path: String
+        let paused: Bool
     }
 
     /// `GET /rest/config/folders` → the configured folders (id, label, filesystem path).
@@ -144,6 +148,41 @@ struct SyncthingAPI: Equatable {
         return try JSONDecoder().decode(Response.self, from: data).errors ?? []
     }
 
+    /// One page of a remote device's need list for a folder.
+    struct RemoteNeed {
+        /// Folder-relative paths the device still needs.
+        let needed: Set<String>
+        /// Whether `needed` is the complete list (the page wasn't full).
+        /// Absence-based delivery inference is only sound when complete.
+        let complete: Bool
+    }
+
+    /// Items fetched per `remoteNeed` page. One page bounds the query cost;
+    /// a full page (a peer with a massive backlog) just defers per-file
+    /// confirmation to the folder-level catch-up path.
+    static let remoteNeedPageSize = 1000
+
+    /// `GET /rest/db/remoteneed?folder=&device=` → what `device` still needs
+    /// to be in sync with `folder`, computed from OUR index — our number
+    /// space, so comparing our rows against it is sound (unlike
+    /// FolderCompletion.sequence, which lives in the remote's own space).
+    /// Drives the activity feed's per-file delivery confirmation.
+    func remoteNeed(folder: String, device: String) async throws -> RemoteNeed {
+        struct File: Decodable { let name: String }
+        struct Response: Decodable {
+            let files: [File]?
+            let perpage: Int?
+        }
+        let query = "folder=\(try Self.encodeQueryValue(folder))"
+            + "&device=\(try Self.encodeQueryValue(device))"
+            + "&page=1&perpage=\(Self.remoteNeedPageSize)"
+        let data = try await send("/rest/db/remoteneed?\(query)", method: "GET")
+        let decoded = try JSONDecoder().decode(Response.self, from: data)
+        let files = decoded.files ?? []
+        return RemoteNeed(needed: Set(files.map(\.name)),
+                          complete: files.count < (decoded.perpage ?? Self.remoteNeedPageSize))
+    }
+
     private static func encodeQueryValue(_ value: String) throws -> String {
         let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         guard let encoded = value.addingPercentEncoding(withAllowedCharacters: unreserved) else {
@@ -169,13 +208,26 @@ struct SyncthingAPI: Equatable {
         return try JSONDecoder().decode([Device].self, from: data)
     }
 
+    /// `GET /rest/system/connections` → the ids of the remote devices currently
+    /// connected. Seeds the monitor's outbound-transfer view at connect; live
+    /// changes arrive as DeviceConnected/DeviceDisconnected events.
+    func connectedDevices() async throws -> Set<String> {
+        struct Connection: Decodable { let connected: Bool }
+        struct Response: Decodable { let connections: [String: Connection] }
+        let data = try await send("/rest/system/connections", method: "GET")
+        let decoded = try JSONDecoder().decode(Response.self, from: data)
+        return Set(decoded.connections.filter(\.value.connected).map(\.key))
+    }
+
     // MARK: Events
 
     /// One event from `/rest/events`. The type-specific `data` payload is
     /// flattened to the fields we consume: StateChanged carries folder/to,
-    /// DevicePaused/DeviceResumed carry device, FolderErrors carries
-    /// folder/errors; anything else decodes with all fields nil (ConfigSaved's
-    /// payload — the whole new config — is ignored).
+    /// DevicePaused/DeviceResumed/DeviceConnected/DeviceDisconnected carry
+    /// device, FolderErrors carries folder/errors, FolderCompletion carries
+    /// device/folder/completion/needItems/needDeletes; anything else decodes
+    /// with all fields nil (ConfigSaved's payload — the whole new config — is
+    /// ignored).
     struct Event: Decodable {
         let id: Int
         let type: String
@@ -183,9 +235,18 @@ struct SyncthingAPI: Equatable {
         let to: String?
         let device: String?
         let errors: [FolderError]?
+        let completion: Double?
+        let needItems: Int?
+        let needDeletes: Int?
 
         private enum CodingKeys: String, CodingKey { case id, type, data }
-        private enum DataKeys: String, CodingKey { case folder, to, device, errors }
+        private enum DataKeys: String, CodingKey {
+            case folder, to, device, errors, completion, needItems, needDeletes
+            /// DeviceConnected/DeviceDisconnected name the device `id` where
+            /// DevicePaused/DeviceResumed/FolderCompletion say `device` —
+            /// an upstream inconsistency; `device` is decoded from either.
+            case deviceId = "id"
+        }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -194,10 +255,15 @@ struct SyncthingAPI: Equatable {
             if let data = try? container.nestedContainer(keyedBy: DataKeys.self, forKey: .data) {
                 folder = try? data.decodeIfPresent(String.self, forKey: .folder)
                 to = try? data.decodeIfPresent(String.self, forKey: .to)
-                device = try? data.decodeIfPresent(String.self, forKey: .device)
+                device = (try? data.decodeIfPresent(String.self, forKey: .device))
+                    ?? (try? data.decodeIfPresent(String.self, forKey: .deviceId))
                 errors = try? data.decodeIfPresent([FolderError].self, forKey: .errors)
+                completion = try? data.decodeIfPresent(Double.self, forKey: .completion)
+                needItems = try? data.decodeIfPresent(Int.self, forKey: .needItems)
+                needDeletes = try? data.decodeIfPresent(Int.self, forKey: .needDeletes)
             } else {
                 folder = nil; to = nil; device = nil; errors = nil
+                completion = nil; needItems = nil; needDeletes = nil
             }
         }
     }

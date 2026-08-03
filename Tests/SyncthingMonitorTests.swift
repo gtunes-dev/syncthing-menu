@@ -192,6 +192,224 @@ struct SyncthingMonitorTests {
         try await expectEventually { snapshots.last?.permissionErrorFolders == [] }
     }
 
+    /// Outbound transfer: the sending side's folder state stays idle, so
+    /// syncing is detected from FolderCompletion — a connected remote peer
+    /// reporting an incomplete folder is data in flight; full catch-up ends
+    /// it. Connectedness comes from the seed (no DeviceConnected event fires
+    /// for an already-connected peer).
+    @Test func behindConnectedPeerDrivesSyncing() async throws {
+        let server = FakeSyncthingServer()
+        try server.start()
+        defer { server.stop() }
+        server.devices = [.init(deviceID: "SELF", paused: false),
+                          .init(deviceID: "A", paused: false, connected: true)]
+        server.folders = [.init(id: "f1")]
+
+        let monitor = SyncthingMonitor()
+        defer { monitor.disconnect() }
+        var snapshots: [SyncthingMonitor.Snapshot] = []
+        monitor.onChange = { snapshots.append($0) }
+
+        monitor.connect(api: api(for: server))
+        try await expectEventually { !snapshots.isEmpty }
+        #expect(snapshots.first?.activity == .idle)
+
+        server.pushEvent(type: "FolderCompletion", data: [
+            "folder": "f1", "device": "A",
+            "completion": 42.5, "needItems": 3, "needDeletes": 0,
+        ])
+        try await expectEventually { snapshots.last?.activity == .syncing }
+
+        server.pushEvent(type: "FolderCompletion", data: [
+            "folder": "f1", "device": "A",
+            "completion": 100, "needItems": 0, "needDeletes": 0,
+        ])
+        try await expectEventually { snapshots.last?.activity == .idle }
+    }
+
+    /// Deletes-only outbound changes: completion can report 100 while
+    /// needDeletes > 0 — the tombstones still need delivering.
+    @Test func needDeletesAloneCountsAsBehind() async throws {
+        let server = FakeSyncthingServer()
+        try server.start()
+        defer { server.stop() }
+        server.devices = [.init(deviceID: "SELF", paused: false),
+                          .init(deviceID: "A", paused: false, connected: true)]
+        server.folders = [.init(id: "f1")]
+
+        let monitor = SyncthingMonitor()
+        defer { monitor.disconnect() }
+        var snapshots: [SyncthingMonitor.Snapshot] = []
+        monitor.onChange = { snapshots.append($0) }
+
+        monitor.connect(api: api(for: server))
+        try await expectEventually { !snapshots.isEmpty }
+
+        server.pushEvent(type: "FolderCompletion", data: [
+            "folder": "f1", "device": "A",
+            "completion": 100, "needItems": 0, "needDeletes": 2,
+        ])
+        try await expectEventually { snapshots.last?.activity == .syncing }
+
+        server.pushEvent(type: "FolderCompletion", data: [
+            "folder": "f1", "device": "A",
+            "completion": 100, "needItems": 0, "needDeletes": 0,
+        ])
+        try await expectEventually { snapshots.last?.activity == .idle }
+    }
+
+    /// Only peers that can actually receive data count: disconnect drops the
+    /// behind flag (fresh reports arrive on reconnect), pause filters it
+    /// while keeping it (resume restores the signal without a new report).
+    /// A FolderCompletion for the local device never counts.
+    @Test func onlyConnectedUnpausedPeersDriveOutbound() async throws {
+        let server = FakeSyncthingServer()
+        try server.start()
+        defer { server.stop() }
+        // SELF "connected" so that, were the myID guard missing, its report
+        // below would keep the aggregate syncing past A's disconnect.
+        server.devices = [.init(deviceID: "SELF", paused: false, connected: true),
+                          .init(deviceID: "A", paused: false, connected: true)]
+        server.folders = [.init(id: "f1")]
+
+        let monitor = SyncthingMonitor()
+        defer { monitor.disconnect() }
+        var snapshots: [SyncthingMonitor.Snapshot] = []
+        monitor.onChange = { snapshots.append($0) }
+
+        monitor.connect(api: api(for: server))
+        try await expectEventually { !snapshots.isEmpty }
+
+        // Self-reports are ignored outright.
+        server.pushEvent(type: "FolderCompletion", data: [
+            "folder": "f1", "device": "SELF", "completion": 10,
+        ])
+        server.pushEvent(type: "FolderCompletion", data: [
+            "folder": "f1", "device": "A", "completion": 10,
+        ])
+        try await expectEventually { snapshots.last?.activity == .syncing }
+
+        // Connect/disconnect events carry the device id as "id" (not
+        // "device" like the pause events) — the pushes model the real shape.
+        server.pushEvent(type: "DeviceDisconnected", data: ["id": "A", "error": "EOF"])
+        try await expectEventually { snapshots.last?.activity == .idle }
+
+        // Reconnect alone doesn't resurrect the dropped flag…
+        server.pushEvent(type: "DeviceConnected", data: ["id": "A"])
+        server.pushEvent(type: "FolderCompletion", data: [
+            "folder": "f1", "device": "A", "completion": 55,
+        ])
+        try await expectEventually { snapshots.last?.activity == .syncing }
+
+        // …while pause merely filters: the peer still needs the data, so
+        // resume restores the signal without a fresh report.
+        server.pushEvent(type: "DevicePaused", data: ["device": "A"])
+        try await expectEventually { snapshots.last?.activity == .idle }
+        server.pushEvent(type: "DeviceResumed", data: ["device": "A"])
+        try await expectEventually { snapshots.last?.activity == .syncing }
+    }
+
+    /// Outbound syncing takes the same rung as inbound on the ladder: it
+    /// outranks a concurrent scan, and the aggregate falls back to scanning
+    /// (not idle) when the peer catches up mid-scan.
+    @Test func outboundOutranksScanning() async throws {
+        let server = FakeSyncthingServer()
+        try server.start()
+        defer { server.stop() }
+        server.devices = [.init(deviceID: "SELF", paused: false),
+                          .init(deviceID: "A", paused: false, connected: true)]
+        server.folders = [.init(id: "f1"), .init(id: "f2")]
+
+        let monitor = SyncthingMonitor()
+        defer { monitor.disconnect() }
+        var snapshots: [SyncthingMonitor.Snapshot] = []
+        monitor.onChange = { snapshots.append($0) }
+
+        monitor.connect(api: api(for: server))
+        try await expectEventually { !snapshots.isEmpty }
+
+        server.pushEvent(type: "StateChanged", data: ["folder": "f2", "to": "scanning"])
+        try await expectEventually { snapshots.last?.activity == .scanning }
+
+        server.pushEvent(type: "FolderCompletion", data: [
+            "folder": "f1", "device": "A", "completion": 10,
+        ])
+        try await expectEventually { snapshots.last?.activity == .syncing }
+
+        server.pushEvent(type: "FolderCompletion", data: [
+            "folder": "f1", "device": "A", "completion": 100,
+        ])
+        try await expectEventually { snapshots.last?.activity == .scanning }
+    }
+
+    /// THE PAUSED-FOLDER REGRESSION (found live 2026-08-03): /rest/folder/errors
+    /// returns 404 for a paused folder, which killed the whole seed — the
+    /// monitor never published and looped on escalation while the endpoint was
+    /// healthy. A paused folder must not break seeding, must never escalate,
+    /// and contributes no activity or permission errors.
+    @Test func pausedFolderDoesNotBreakSeeding() async throws {
+        let server = FakeSyncthingServer()
+        try server.start()
+        defer { server.stop() }
+        server.devices = [.init(deviceID: "SELF", paused: false),
+                          .init(deviceID: "A", paused: false, connected: true)]
+        server.folders = [
+            .init(id: "f1", label: "Paused", state: "syncing", paused: true,
+                  errors: [(path: "/a", error: "operation not permitted")]),
+            .init(id: "f2", label: "Active"),
+        ]
+
+        let monitor = SyncthingMonitor()
+        defer { monitor.disconnect() }
+        monitor.retrySleep = fastSleep
+        var suspected = 0
+        monitor.onEndpointSuspect = { suspected += 1 }
+        var snapshots: [SyncthingMonitor.Snapshot] = []
+        monitor.onChange = { snapshots.append($0) }
+
+        monitor.connect(api: api(for: server))
+        try await expectEventually { !snapshots.isEmpty }
+
+        // Seed succeeded despite the paused folder's 404; its scripted
+        // "syncing" state and permission error are ignored — not running.
+        #expect(snapshots.first == .init(allDevicesPaused: false, activity: .idle))
+        #expect(suspected == 0)
+    }
+
+    /// A locally paused folder can't be sending: neither its (stale)
+    /// StateChanged events nor a behind peer on it may drive activity.
+    /// Unpausing arrives as a config change and re-includes it.
+    @Test func pausedFolderEventsDoNotCount() async throws {
+        let server = FakeSyncthingServer()
+        try server.start()
+        defer { server.stop() }
+        server.devices = [.init(deviceID: "SELF", paused: false),
+                          .init(deviceID: "A", paused: false, connected: true)]
+        server.folders = [.init(id: "f1", paused: true), .init(id: "f2")]
+
+        let monitor = SyncthingMonitor()
+        defer { monitor.disconnect() }
+        var snapshots: [SyncthingMonitor.Snapshot] = []
+        monitor.onChange = { snapshots.append($0) }
+
+        monitor.connect(api: api(for: server))
+        try await expectEventually { !snapshots.isEmpty }
+
+        server.pushEvent(type: "StateChanged", data: ["folder": "f1", "to": "scanning"])
+        server.pushEvent(type: "FolderCompletion", data: [
+            "folder": "f1", "device": "A", "completion": 10,
+        ])
+        // Marker on the active folder proves both events were processed.
+        server.pushEvent(type: "StateChanged", data: ["folder": "f2", "to": "scanning"])
+        try await expectEventually { snapshots.last?.activity == .scanning }
+        #expect(!snapshots.contains { $0.activity == .syncing })
+
+        // Unpause (a config change): the folder's activity counts again.
+        server.folders = [.init(id: "f1", state: "syncing"), .init(id: "f2")]
+        server.pushEvent(type: "ConfigSaved")
+        try await expectEventually { snapshots.last?.activity == .syncing }
+    }
+
     /// The health-probe contract: a persistently dark endpoint escalates exactly
     /// once (after the tolerated failures) and the monitor stops on its own — the
     /// session owns recovery from there.

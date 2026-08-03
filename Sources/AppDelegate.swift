@@ -27,8 +27,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Per-file change feed for the Activity window. Polls only while that
     /// window is visible.
     private let activityFeed = ActivityFeed()
-    /// Global status shared with the Activity window (subtitle + toolbar
-    /// enablement), recomputed from the process state + monitor snapshot.
+    /// The canonical status presentation model — the menu-bar controller and
+    /// the Activity window both render from it. Recomputed from the process
+    /// state + monitor snapshot (`pushStatus`).
     private let syncthingStatus = SyncthingStatusModel()
     private var lastDaemonState: SyncthingProcess.State = .stopped
     private var lastMonitorSnapshot = SyncthingMonitor.Snapshot()
@@ -72,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         activityWindowController = activityController
 
         let controller = StatusItemController(
+            status: syncthingStatus,
             onOpenSettings: { settingsController.show() },
             onAbout: { aboutController.show() }
         )
@@ -84,12 +86,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.onUpdateSyncthing = { [weak self] in self?.syncthingUpdateSource.installAvailable() }
         statusItemController = controller
 
-        // Reflect the daemon's live state in the menu; the session turns lifecycle
-        // into a verified endpoint for every REST consumer (supervision model:
-        // Process → Session → consumers, design.md § Process & session supervision).
+        // Reflect the daemon's live state in the status model (the menu renders
+        // from it); the session turns lifecycle into a verified endpoint for
+        // every REST consumer (supervision model: Process → Session → consumers,
+        // design.md § Process & session supervision). The launch-time GUI URL
+        // rides along; the session's verified URL supersedes it below.
         syncthingProcess.onStateChange = { [weak self] state in
             guard let self else { return }
-            self.statusItemController?.update(daemonState: state)
+            if case let .running(guiURL) = state {
+                self.statusItemController?.update(webUIURL: guiURL)
+            } else {
+                self.statusItemController?.update(webUIURL: nil)
+            }
             self.lastDaemonState = state
             self.pushStatus()
             self.daemonSession.processStateChanged(state)
@@ -118,8 +126,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.syncthingUpdateSource.sessionChanged(api: nil)
                 self.statusItemController?.update(folders: [])
                 // The monitor's last snapshot dies with the daemon.
-                self.statusItemController?.update(allDevicesPaused: false, activity: .idle,
-                                                  folderAttention: false)
                 self.folderHealth.permissionErrorFolders = []
                 self.lastMonitorSnapshot = .init()
                 self.pushStatus()
@@ -136,15 +142,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.daemonSession.endpointSuspect()
         }
 
-        // The monitor's snapshot drives the icon's Paused/Syncing/attention
-        // marks, the status line, the Pause⇄Resume toggle label, and the FDA
-        // section's alert state in Settings.
+        // The monitor's snapshot feeds the status model (which drives the
+        // icon's Paused/Syncing/attention marks, the status line, and the
+        // Pause⇄Resume toggle label) plus the FDA section's alert state in
+        // Settings.
         syncthingMonitor.onChange = { [weak self] snapshot in
             guard let self else { return }
-            self.statusItemController?.update(
-                allDevicesPaused: snapshot.allDevicesPaused,
-                activity: snapshot.activity,
-                folderAttention: !snapshot.permissionErrorFolders.isEmpty)
             self.folderHealth.permissionErrorFolders = snapshot.permissionErrorFolders
             self.lastMonitorSnapshot = snapshot
             self.pushStatus()

@@ -1,7 +1,12 @@
 import AppKit
+import Combine
 
 /// Owns the menu-bar status item and its dropdown menu, and reflects the live
 /// daemon state + update availability through the status-item icon and the menu.
+/// Daemon state arrives by observing `SyncthingStatusModel` (the canonical
+/// presentation model — the priority chain is resolved there); everything here
+/// is a 1:1 rendering of its `display` value into this surface's media (status
+/// row, icon, tooltip, verb visibility).
 ///
 /// The menu groups this app's items (About, Settings) above the Syncthing items
 /// (status, web UI, folders) — matching the Settings and About windows.
@@ -24,6 +29,8 @@ final class StatusItemController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private let foldersMenu = NSMenu()
+    private let status: SyncthingStatusModel
+    private var statusSink: AnyCancellable?
     private let onOpenSettings: () -> Void
     private let onAbout: () -> Void
 
@@ -55,66 +62,76 @@ final class StatusItemController: NSObject {
     private var foldersItem: NSMenuItem?
     private var rescanItem: NSMenuItem?
     private var pauseToggleItem: NSMenuItem?
-    private var allDevicesPaused = false
-    private var activity: SyncActivity = .idle
-    /// A folder Syncthing can't access (permission error) — needs the user.
-    private var folderAttention = false
     private var appUpdate: PendingUpdate?
     private var syncthingUpdate: PendingUpdate?
     /// The managed daemon's GUI URL when running; nil otherwise.
     private var webUIURL: String?
 
-    private var daemonState: SyncthingProcess.State = .stopped
     private var updateAvailable = false
 
-    init(onOpenSettings: @escaping () -> Void, onAbout: @escaping () -> Void) {
+    init(status: SyncthingStatusModel,
+         onOpenSettings: @escaping () -> Void, onAbout: @escaping () -> Void) {
+        self.status = status
         self.onOpenSettings = onOpenSettings
         self.onAbout = onAbout
         super.init()
         buildMenu()
         menu.delegate = self
         statusItem.menu = menu
-        refreshIcon()
+        // objectWillChange (not $phase): a smoothing drop changes `display`
+        // without a phase change. receive-on-main defers one tick so the
+        // model's new values are settled when we read them (it emits on
+        // willSet).
+        statusSink = status.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.applyStatus() }
+        applyStatus()
     }
 
     // MARK: - Live state
 
-    /// Reflect the daemon's current state in the menu + icon. Call on the main thread.
+    /// Render the model's current state into this surface: status row, verb
+    /// visibility, Pause⇄Resume toggle label, Settings badge, and icon. Runs
+    /// on every phase change (and once at init), whether the change came from
+    /// the process push or the monitor's event stream — so the menu stays
+    /// current without being opened.
     ///
     /// The daemon verbs (Web UI, Folders, Rescan, Pause) are HIDDEN — not
     /// dimmed — when the daemon isn't running: a column of disabled commands
     /// is noise. In their place the stopped/failed states show a single
     /// recovery action, Start Syncthing.
-    func update(daemonState: SyncthingProcess.State) {
-        self.daemonState = daemonState
-        refreshSettingsBadge()
-        switch daemonState {
-        case .stopped:
-            setStatus(dot: .tertiaryLabelColor, detail: "Not running")
-            webUIURL = nil
-            setDaemonVerbs(visible: false, canStart: true)
-        case .starting:
-            setStatus(dot: .systemOrange, detail: "Starting…")
-            webUIURL = nil
-            setDaemonVerbs(visible: false, canStart: false)
-        case let .running(guiURL):
-            setRunningStatus()
-            webUIURL = guiURL
-            setDaemonVerbs(visible: true, canStart: false)
-        case let .failed(message):
-            // The full (possibly long) message lives in the icon tooltip; the
-            // menu line stays a one-glance summary.
-            setStatus(dot: .systemRed, detail: Self.truncate(message, to: 60))
-            webUIURL = nil
-            setDaemonVerbs(visible: false, canStart: true)
+    private func applyStatus() {
+        // The full (possibly long) failure message lives in the icon tooltip;
+        // the menu line stays a one-glance summary.
+        setStatus(dot: Self.dotColor(for: status.display),
+                  detail: Self.truncate(status.statusText, to: 60))
+        switch status.phase {
+        case .running: setDaemonVerbs(visible: true, canStart: false)
+        case .starting: setDaemonVerbs(visible: false, canStart: false)
+        case .notRunning, .failed: setDaemonVerbs(visible: false, canStart: true)
         }
+        pauseToggleItem?.title = status.isPaused ? "Resume All Devices" : "Pause All Devices"
+        refreshSettingsBadge()
         refreshIcon()
     }
 
-    /// The session's verified endpoint URL. Fresher than the launch-time URL in
-    /// `update(daemonState:)` when the GUI address drifted mid-run (concrete-config
-    /// case); the session publish always follows the daemon-state push, so this
-    /// value wins while running.
+    /// The status row's preattentive cue, 1:1 on the display state: green
+    /// running / orange transitional-or-needs-user / red failed / neutral
+    /// stopped. Color is never the sole carrier — the detail text states the
+    /// same fact in words.
+    private static func dotColor(for display: SyncthingStatusModel.DisplayState) -> NSColor {
+        switch display {
+        case .notRunning: .tertiaryLabelColor
+        case .starting: .systemOrange
+        case .failed: .systemRed
+        case .attention, .paused: .systemOrange
+        case .syncing, .scanning, .running: .systemGreen
+        }
+    }
+
+    /// The session's verified endpoint URL while the daemon runs; nil when it
+    /// stops. Pushed by the owner (the session layer verifies fresher URLs than
+    /// the launch-time one when the GUI address drifts mid-run).
     func update(webUIURL: String?) {
         self.webUIURL = webUIURL
     }
@@ -124,20 +141,6 @@ final class StatusItemController: NSObject {
             item?.isHidden = !visible
         }
         startItem?.isHidden = !canStart
-    }
-
-    /// Reflect the monitor's live activity snapshot: the Pause⇄Resume toggle
-    /// label, the status line, and the icon (Paused/Syncing marks). Fed by
-    /// `SyncthingMonitor` over the daemon's push event stream, so it stays
-    /// current without the menu being opened.
-    func update(allDevicesPaused: Bool, activity: SyncActivity, folderAttention: Bool) {
-        self.allDevicesPaused = allDevicesPaused
-        self.activity = activity
-        self.folderAttention = folderAttention
-        pauseToggleItem?.title = allDevicesPaused ? "Resume All Devices" : "Pause All Devices"
-        refreshSettingsBadge()
-        if case .running = daemonState { setRunningStatus() }
-        refreshIcon()
     }
 
     /// A caution badge on Settings… while a folder is blocked on permissions:
@@ -151,8 +154,7 @@ final class StatusItemController: NSObject {
     /// whatever the system put there) and restore the captured image when the
     /// attention clears. Writing nil permanently killed the system gear.
     private func refreshSettingsBadge() {
-        let running = if case .running = daemonState { true } else { false }
-        if running && folderAttention {
+        if status.needsAttention {
             if settingsItem?.image !== Self.attentionBadge {
                 defaultSettingsImage = settingsItem?.image
                 settingsItem?.image = Self.attentionBadge
@@ -202,25 +204,6 @@ final class StatusItemController: NSObject {
         image.accessibilityDescription = "Needs attention"
         return image
     }()
-
-    /// The running daemon's status line. Attention (a folder Syncthing can't
-    /// access) outranks everything — it needs the user's action; Paused outranks
-    /// activity: a pause is the user's deliberate mode, and dominates transient
-    /// scan activity. The text distinguishes Scanning from Syncing (the icon
-    /// stays coarse — one activity mark for either).
-    private func setRunningStatus() {
-        if folderAttention {
-            setStatus(dot: .systemOrange, detail: "Can't access some folders")
-        } else if allDevicesPaused {
-            setStatus(dot: .systemOrange, detail: "Paused")
-        } else {
-            switch activity {
-            case .syncing: setStatus(dot: .systemGreen, detail: "Syncing…")
-            case .scanning: setStatus(dot: .systemGreen, detail: "Scanning…")
-            case .idle: setStatus(dot: .systemGreen, detail: "Running")
-            }
-        }
-    }
 
     /// Replace the Folders submenu contents. Empty → a single, non-selectable
     /// "No Folders" item.
@@ -278,28 +261,23 @@ final class StatusItemController: NSObject {
         text.count <= limit ? text : text.prefix(limit).trimmingCharacters(in: .whitespaces) + "…"
     }
 
-    /// Choose the menu-bar icon from (daemon state, activity, update availability).
-    ///
-    /// State priority while running: Paused > Syncing > Idle — a pause is the
-    /// user's deliberate mode and dominates transient activity. Failure shows
-    /// the error mark; stopped/starting show the system-dimmed
+    /// Choose the menu-bar icon, 1:1 on the display state (+ update
+    /// availability). Attention shows the error mark even though the daemon
+    /// runs: the condition needs the user, and the icon is the only
+    /// always-visible surface. Scanning and syncing share the one activity
+    /// mark: the icon is a preattentive summary ("busy"), the texts carry the
+    /// distinction. Stopped/starting show the system-dimmed
     /// (`appearsDisabled`) idle mark — the native grammar for
     /// present-but-inactive, and it composes with the update arrow.
     private func refreshIcon() {
         let base: String
-        let dimmed: Bool
-        switch daemonState {
-        case .running:
-            // Attention = the error mark even though the daemon runs: the
-            // condition needs the user, and the icon is the only always-visible
-            // surface. Below that, Paused (deliberate mode) outranks Syncing.
-            // Scanning and syncing share the one activity mark: the icon is a
-            // preattentive summary ("busy"), the texts carry the distinction.
-            base = folderAttention ? "Error"
-                 : (allDevicesPaused ? "Paused" : (activity != .idle ? "Syncing" : "Idle"))
-            dimmed = false
-        case .stopped, .starting: base = "Idle"; dimmed = true
-        case .failed: base = "Error"; dimmed = false
+        var dimmed = false
+        switch status.display {
+        case .failed, .attention: base = "Error"
+        case .paused: base = "Paused"
+        case .syncing, .scanning: base = "Syncing"
+        case .running: base = "Idle"
+        case .notRunning, .starting: base = "Idle"; dimmed = true
         }
         let name = "Status\(base)\(updateAvailable ? "Update" : "")"
         let image = NSImage(named: name)
@@ -315,20 +293,7 @@ final class StatusItemController: NSObject {
     /// description — the zero-click reading of the icon. Pending updates are
     /// named with their versions.
     private func statusSummary() -> String {
-        let state: String
-        switch daemonState {
-        case .stopped: state = "Syncthing is not running"
-        case .starting: state = "Syncthing is starting"
-        case .running:
-            state = folderAttention
-                ? "Syncthing can't access some folders — open Settings (Full Disk Access may be needed)"
-                : allDevicesPaused ? "Syncthing is paused"
-                : activity == .syncing ? "Syncthing is syncing"
-                : activity == .scanning ? "Syncthing is scanning"
-                : "Syncthing is running"
-        case let .failed(message): state = "Syncthing failed — \(message)"
-        }
-        var parts = ["Syncthing Menu — \(state)"]
+        var parts = ["Syncthing Menu — \(status.summaryText)"]
         if let update = syncthingUpdate { parts.append("Syncthing \(update.version) available") }
         if let update = appUpdate { parts.append("Syncthing Menu \(update.version) available") }
         return parts.joined(separator: " · ")
@@ -470,7 +435,7 @@ final class StatusItemController: NSObject {
     }
 
     @objc private func togglePauseAll() {
-        onPauseToggle?(!allDevicesPaused)
+        onPauseToggle?(!status.isPaused)
     }
 
     @objc private func openFolder(_ sender: NSMenuItem) {

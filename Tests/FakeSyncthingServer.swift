@@ -17,6 +17,8 @@ final class FakeSyncthingServer {
         var deviceID: String
         var paused: Bool
         var name = ""
+        /// Served by /rest/system/connections (the monitor's connectedness seed).
+        var connected = false
     }
 
     struct Folder {
@@ -24,6 +26,10 @@ final class FakeSyncthingServer {
         var label = ""
         var path = "/tmp"
         var state = "idle"
+        /// Paused folders are not running: /rest/folder/errors returns 404
+        /// "folder is paused" for them (mirrors the real daemon, verified
+        /// live 2026-08-03).
+        var paused = false
         /// Current scan/pull errors, served by /rest/folder/errors.
         var errors: [(path: String, error: String)] = []
     }
@@ -114,6 +120,19 @@ final class FakeSyncthingServer {
 
     var requestedPaths: [String] {
         queue.sync { _requestedPaths }
+    }
+
+    /// Scripted /rest/db/remoteneed responses, keyed by "folder|device".
+    /// Unscripted pairs get a 404 — the "query failed, rows stay awaiting"
+    /// degradation path.
+    private var _remoteNeeds: [String: (names: [String], perpage: Int)] = [:]
+
+    /// Script the need list one remoteneed query returns. `perpage` echoes in
+    /// the response; setting it to `names.count` models a truncated (full)
+    /// page, whose absences must not be trusted.
+    func setRemoteNeed(folder: String, device: String, names: [String],
+                       perpage: Int = 1000) {
+        queue.sync { _remoteNeeds["\(folder)|\(device)"] = (names, perpage) }
     }
 
     /// Append one event to the disk-events history (/rest/events/disk).
@@ -272,16 +291,35 @@ final class FakeSyncthingServer {
         case ("GET", "/rest/config/devices"):
             send(_devices.map { ["deviceID": $0.deviceID, "paused": $0.paused, "name": $0.name] },
                  on: connection)
+        case ("GET", "/rest/system/connections"):
+            send(["connections": Dictionary(uniqueKeysWithValues: _devices.map {
+                ($0.deviceID, ["connected": $0.connected])
+            })], on: connection)
         case ("GET", "/rest/config/folders"):
-            send(_folders.map { ["id": $0.id, "label": $0.label, "path": $0.path] }, on: connection)
+            send(_folders.map { ["id": $0.id, "label": $0.label, "path": $0.path,
+                                 "paused": $0.paused] }, on: connection)
         case ("GET", "/rest/db/status"):
             let state = _folders.first { $0.id == query["folder"] }?.state ?? "idle"
             send(["state": state], on: connection)
         case ("GET", "/rest/folder/errors"):
-            let errors = _folders.first { $0.id == query["folder"] }?.errors ?? []
-            send(["folder": query["folder"] ?? "", "page": 1, "perpage": 100,
-                  "errors": errors.map { ["path": $0.path, "error": $0.error] }],
+            guard let folder = _folders.first(where: { $0.id == query["folder"] }),
+                  !folder.paused else {
+                // The real daemon 404s ("folder is paused") — the folder
+                // isn't running, so it has no error store to read.
+                send(["error": "folder is paused"], status: 404, on: connection)
+                return
+            }
+            send(["folder": folder.id, "page": 1, "perpage": 100,
+                  "errors": folder.errors.map { ["path": $0.path, "error": $0.error] }],
                  on: connection)
+        case ("GET", "/rest/db/remoteneed"):
+            guard let folder = query["folder"], let device = query["device"],
+                  let entry = _remoteNeeds["\(folder)|\(device)"] else {
+                send(["error": "not found"], status: 404, on: connection)
+                return
+            }
+            send(["files": entry.names.map { ["name": $0] },
+                  "page": 1, "perpage": entry.perpage], on: connection)
         case ("GET", "/rest/events"):
             handleEvents(query, on: connection)
         case ("GET", "/rest/events/disk"):

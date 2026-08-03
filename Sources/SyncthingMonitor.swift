@@ -1,12 +1,7 @@
 import Foundation
 
-/// Live daemon-state monitor over Syncthing's events API.
-///
-/// One long-poll connection (`GET /rest/events`): push semantics — the request
-/// parks server-side until a matching event occurs or the server-side timeout
-/// lapses (an empty batch), and we immediately re-issue. Idle cost is one
-/// trivial localhost round-trip per ~50s; no timers, no busy polling. This is
-/// the same mechanism Syncthing's own web GUI uses.
+/// Live daemon-state monitor over Syncthing's events API (`EventStream` —
+/// stream mechanics, cursor-first seeding, and error recovery live there).
 ///
 /// Tracks two aggregates and reports them on the main thread:
 /// - **allDevicesPaused** — every remote device paused (drives the Paused
@@ -14,13 +9,22 @@ import Foundation
 /// - **activity** — idle/scanning/syncing across all folders (syncing
 ///   outranks scanning; drives the icon's Syncing mark and the status texts)
 ///
-/// A filtered event subscription is created on first use and only reports
-/// events from that moment on (verified live — there is NO usable history
-/// replay for a fresh subscription). So current state is seeded directly:
-/// device pause flags from config, folder activity from per-folder status —
-/// on connect, on ConfigSaved, and after any stream error. The event cursor
-/// is established BEFORE seeding, so a change landing mid-seed is still
-/// delivered by the first long-poll — no gap.
+/// Syncing is detected in BOTH directions. Inbound (this device pulling)
+/// shows in local folder states via StateChanged. Outbound (peers pulling
+/// from us) never touches local folder state — the sending side stays "idle"
+/// throughout — so it is detected from FolderCompletion: a **connected,
+/// unpaused** remote device reporting an incomplete folder still needs data,
+/// which is data in flight. Connectedness gates the signal so an offline
+/// stale peer can't pin the aggregate at syncing forever.
+///
+/// Seeding reads current state directly: device pause flags from config,
+/// folder activity from per-folder status, peer connectedness from
+/// /rest/system/connections — on connect, on ConfigSaved, and after any
+/// stream error. Peer catch-up state is deliberately NOT seeded (that would
+/// be a folders × devices request fan-out): it warms up from the first
+/// FolderCompletion tick (~2s into any active transfer), and the clear-on-
+/// reseed doubles as self-healing — a "behind" flag that survived a stream
+/// gap can't stick.
 /// Aggregate folder activity, coarsened from Syncthing's per-folder states.
 /// Three values because they mean different things to the user: scanning is
 /// local housekeeping (hashing, no network), syncing is data actually moving
@@ -30,6 +34,22 @@ enum SyncActivity: Equatable {
     case idle
     case scanning
     case syncing
+}
+
+/// Ordered by display priority — syncing > scanning > idle — so aggregation
+/// and display smoothing can compare levels instead of re-encoding the ladder.
+extension SyncActivity: Comparable {
+    private var rank: Int {
+        switch self {
+        case .idle: 0
+        case .scanning: 1
+        case .syncing: 2
+        }
+    }
+
+    static func < (lhs: SyncActivity, rhs: SyncActivity) -> Bool {
+        lhs.rank < rhs.rank
+    }
 }
 
 final class SyncthingMonitor {
@@ -64,17 +84,27 @@ final class SyncthingMonitor {
         "syncing", "sync-waiting", "sync-preparing", "cleaning", "clean-waiting",
     ]
     private static let eventTypes = ["StateChanged", "DevicePaused", "DeviceResumed",
-                                     "ConfigSaved", "FolderErrors"]
-    /// Server-side long-poll timeout, seconds (the request timeout is padded
-    /// past it — see `SyncthingAPI.events`).
-    private static let pollTimeout = 50
+                                     "DeviceConnected", "DeviceDisconnected",
+                                     "FolderCompletion", "ConfigSaved", "FolderErrors"]
 
-    private var task: Task<Void, Never>?
+    private var stream: EventStream<SyncthingAPI.Event>?
 
     // Touched only on the main thread (the poll task is @MainActor; awaits
     // run the network work off-main).
+    private var myID: String?
     private var remoteDevices = Set<String>()
     private var pausedDevices = Set<String>()
+    private var connectedDevices = Set<String>()
+    /// Remote device → folders that device still needs data for (its latest
+    /// FolderCompletion report was incomplete). The outbound half of syncing;
+    /// counted only while the device is connected and unpaused.
+    private var behindFolders: [String: Set<String>] = [:]
+    /// Locally paused folders. A paused folder is not RUNNING: it can't scan,
+    /// sync, or send, and its per-folder endpoints 404 ("folder is paused" —
+    /// verified live 2026-08-03), so the seed must not read them and its
+    /// events must not count. Pause/unpause is a config change → ConfigSaved
+    /// → reseed keeps this current.
+    private var pausedFolders = Set<String>()
     private var scanningFolders = Set<String>()
     private var syncingFolders = Set<String>()
     /// Folder ids whose current errors include a permission failure.
@@ -87,14 +117,38 @@ final class SyncthingMonitor {
     /// Replaces any prior connection — safe to call on every session publish.
     func connect(api: SyncthingAPI) {
         disconnect()
-        task = Task { @MainActor in await self.run(api: api) }
+        let stream = EventStream<SyncthingAPI.Event>(
+            label: "monitor",
+            fetch: { try await api.events(since: $0, types: Self.eventTypes,
+                                          timeout: $1, limit: $2) },
+            seed: { [weak self] in
+                guard let self else { return }
+                try await self.seed(api)
+                self.publish(force: true)
+            },
+            handle: { [weak self] events in
+                guard let self else { return }
+                for event in events {
+                    try await self.apply(event, api: api)
+                }
+                self.publish()
+            },
+            failuresBeforeEscalation: Self.failuresBeforeSuspect,
+            onEscalate: { [weak self] in self?.onEndpointSuspect?() })
+        stream.retrySleep = retrySleep
+        self.stream = stream
+        stream.start()
     }
 
     func disconnect() {
-        task?.cancel()
-        task = nil
+        stream?.stop()
+        stream = nil
+        myID = nil
         remoteDevices = []
         pausedDevices = []
+        connectedDevices = []
+        behindFolders = [:]
+        pausedFolders = []
         scanningFolders = []
         syncingFolders = []
         permissionErrors = []
@@ -107,63 +161,19 @@ final class SyncthingMonitor {
     /// couple of seconds, e.g. mid-upgrade) below the escalation threshold.
     private static let failuresBeforeSuspect = 3
 
-    /// Sleeps between failed stream attempts. Injectable seam: tests exercise the
-    /// failure/escalation path without real time passing.
+    /// Sleeps between failed stream attempts (handed to the stream at connect).
+    /// Injectable seam: tests exercise the failure/escalation path without
+    /// real time passing.
     var retrySleep: (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) }
-
-    @MainActor
-    private func run(api: SyncthingAPI) async {
-        var since = 0
-        var needsSeed = true
-        var consecutiveFailures = 0
-        while !Task.isCancelled {
-            do {
-                if needsSeed {
-                    // Cursor first (this also creates the server-side
-                    // subscription), then seed: a change landing during the
-                    // seed has an id past the cursor and arrives in the loop.
-                    since = try await api.events(since: 0, types: Self.eventTypes,
-                                                 timeout: 1, limit: 1).last?.id ?? 0
-                    try await seed(api)
-                    needsSeed = false
-                    publish(force: true)
-                }
-                let events = try await api.events(since: since, types: Self.eventTypes,
-                                                  timeout: Self.pollTimeout)
-                guard !Task.isCancelled else { return }
-                consecutiveFailures = 0
-                for event in events {
-                    since = max(since, event.id)
-                    try await apply(event, api: api)
-                }
-                publish()
-            } catch {
-                guard !Task.isCancelled else { return }
-                // Daemon unreachable (restarting, mid-upgrade) or a decode
-                // hiccup: back off, then rebuild from scratch — event IDs
-                // reset when the worker restarts, so keeping a stale `since`
-                // could go silent forever. If it stays dark, the endpoint
-                // itself is suspect (port/key rotation): escalate to the
-                // session and stop — it reconnects us against the endpoint
-                // it re-verifies.
-                consecutiveFailures += 1
-                if consecutiveFailures >= Self.failuresBeforeSuspect {
-                    Log.monitor.log("endpoint suspect after \(consecutiveFailures) failures — escalating")
-                    onEndpointSuspect?()
-                    return
-                }
-                since = 0
-                needsSeed = true
-                await retrySleep(2_000_000_000)
-            }
-        }
-    }
 
     @MainActor
     private func apply(_ event: SyncthingAPI.Event, api: SyncthingAPI) async throws {
         switch event.type {
         case "StateChanged":
-            guard let folder = event.folder else { return }
+            // Ignore events for paused folders: a stale activity event racing
+            // the pause would insert a folder that never emits again — stuck.
+            guard let folder = event.folder,
+                  !pausedFolders.contains(folder) else { return }
             if let to = event.to, Self.scanningStates.contains(to) {
                 scanningFolders.insert(folder)
                 syncingFolders.remove(folder)
@@ -187,6 +197,30 @@ final class SyncthingMonitor {
             if let device = event.device { pausedDevices.insert(device) }
         case "DeviceResumed":
             if let device = event.device { pausedDevices.remove(device) }
+        case "DeviceConnected":
+            if let device = event.device { connectedDevices.insert(device) }
+        case "DeviceDisconnected":
+            if let device = event.device {
+                connectedDevices.remove(device)
+                // A disconnected peer can't be receiving data, and its
+                // completion reports die with the connection; Syncthing
+                // recomputes and re-reports completion on reconnect.
+                behindFolders[device] = nil
+            }
+        case "FolderCompletion":
+            // The remote device's catch-up state for one folder, recomputed
+            // whenever either side's index moves. Replace, don't accumulate:
+            // each event is that (device, folder) pair's current truth.
+            // A locally paused folder can't be sending — a behind peer on it
+            // is not data in flight.
+            guard let device = event.device, device != myID,
+                  let folder = event.folder,
+                  !pausedFolders.contains(folder) else { return }
+            if Self.isBehind(event) {
+                behindFolders[device, default: []].insert(folder)
+            } else {
+                behindFolders[device]?.remove(folder)
+            }
         case "FolderErrors":
             // Carries the folder's CURRENT error list — replace, don't merge.
             guard let folder = event.folder else { return }
@@ -210,29 +244,51 @@ final class SyncthingMonitor {
     private func seed(_ api: SyncthingAPI) async throws {
         let devices = try await api.devices()
         let myID = try await api.myID()
+        self.myID = myID
         remoteDevices = Set(devices.map(\.deviceID)).subtracting([myID])
         pausedDevices = Set(devices.filter(\.paused).map(\.deviceID)).subtracting([myID])
+        connectedDevices = try await api.connectedDevices()
+        // Peer catch-up is event-warmed, not seeded — and clearing here is the
+        // self-heal for any behind flag orphaned by a stream gap (see class doc).
+        behindFolders = [:]
 
         var scanning = Set<String>()
         var syncing = Set<String>()
         var names: [String: String] = [:]
+        var paused = Set<String>()
         var permission = Set<String>()
         for folder in try await api.folders() {
             names[folder.id] = folder.label.isEmpty ? folder.id : folder.label
-            let state = try await api.folderState(id: folder.id)
-            if Self.scanningStates.contains(state) {
-                scanning.insert(folder.id)
-            } else if Self.syncingStates.contains(state) {
-                syncing.insert(folder.id)
+            // A paused folder is not running: it has no activity, its errors
+            // are moot (and unreadable — the endpoint 404s), so skip its
+            // per-folder reads entirely. One paused folder must never take
+            // the whole seed down (that froze the monitor in an escalation
+            // loop — found live 2026-08-03).
+            if folder.paused {
+                paused.insert(folder.id)
+                continue
             }
-            if try await api.folderErrors(id: folder.id)
-                .contains(where: { Self.isPermissionError($0.error) }) {
+            // Per-folder reads are tolerant for the same reason: a folder
+            // that is configured but not running (stopped on a path error,
+            // mid-restart) also 404s. Unreadable = treat as inactive and
+            // error-free rather than killing the seed; the next reseed or
+            // event corrects it.
+            if let state = try? await api.folderState(id: folder.id) {
+                if Self.scanningStates.contains(state) {
+                    scanning.insert(folder.id)
+                } else if Self.syncingStates.contains(state) {
+                    syncing.insert(folder.id)
+                }
+            }
+            if let errors = try? await api.folderErrors(id: folder.id),
+               errors.contains(where: { Self.isPermissionError($0.error) }) {
                 permission.insert(folder.id)
             }
         }
         scanningFolders = scanning
         syncingFolders = syncing
         folderNames = names
+        pausedFolders = paused
         permissionErrors = permission
     }
 
@@ -245,9 +301,27 @@ final class SyncthingMonitor {
             || lowered.contains("permission denied")
     }
 
+    /// This FolderCompletion report says the remote device still needs data.
+    /// `completion` alone isn't sufficient: deletes-only changes can report
+    /// completion 100 with needDeletes > 0.
+    private static func isBehind(_ event: SyncthingAPI.Event) -> Bool {
+        (event.completion ?? 100) < 100 || (event.needItems ?? 0) > 0
+            || (event.needDeletes ?? 0) > 0
+    }
+
+    /// The devices whose behind-ness counts as outbound syncing right now:
+    /// behind on ≥1 folder, connected, and not paused.
+    private var outboundDevices: [String] {
+        behindFolders.compactMap { device, folders in
+            !folders.isEmpty && connectedDevices.contains(device)
+                && !pausedDevices.contains(device) ? device : nil
+        }.sorted()
+    }
+
     @MainActor
     private func publish(force: Bool = false) {
-        let activity: SyncActivity = !syncingFolders.isEmpty ? .syncing
+        let outbound = outboundDevices
+        let activity: SyncActivity = !syncingFolders.isEmpty || !outbound.isEmpty ? .syncing
                                    : !scanningFolders.isEmpty ? .scanning : .idle
         let snapshot = Snapshot(
             allDevicesPaused: !remoteDevices.isEmpty && remoteDevices.isSubset(of: pausedDevices),
@@ -255,7 +329,7 @@ final class SyncthingMonitor {
             permissionErrorFolders: permissionErrors.map { folderNames[$0] ?? $0 }.sorted())
         guard force || snapshot != published else { return }
         published = snapshot
-        Log.monitor.log("allDevicesPaused=\(snapshot.allDevicesPaused) activity=\(String(describing: snapshot.activity), privacy: .public) (scanning: \(self.scanningFolders.isEmpty ? "none" : self.scanningFolders.sorted().joined(separator: ","), privacy: .public); syncing: \(self.syncingFolders.isEmpty ? "none" : self.syncingFolders.sorted().joined(separator: ","), privacy: .public); permissionErrors: \(snapshot.permissionErrorFolders.isEmpty ? "none" : snapshot.permissionErrorFolders.joined(separator: ","), privacy: .public))")
+        Log.monitor.log("allDevicesPaused=\(snapshot.allDevicesPaused) activity=\(String(describing: snapshot.activity), privacy: .public) (scanning: \(self.scanningFolders.isEmpty ? "none" : self.scanningFolders.sorted().joined(separator: ","), privacy: .public); syncing: \(self.syncingFolders.isEmpty ? "none" : self.syncingFolders.sorted().joined(separator: ","), privacy: .public); outbound: \(outbound.isEmpty ? "none" : outbound.map { String($0.prefix(7)) }.joined(separator: ","), privacy: .public); permissionErrors: \(snapshot.permissionErrorFolders.isEmpty ? "none" : snapshot.permissionErrorFolders.joined(separator: ","), privacy: .public))")
         onChange?(snapshot)
     }
 }

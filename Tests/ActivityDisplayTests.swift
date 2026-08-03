@@ -177,4 +177,139 @@ struct ActivityDisplayTests {
         #expect(model.statusText == "daemon exploded")
         #expect(!model.isRunning)
     }
+
+    /// The tooltip/accessibility sentences track the same display state as
+    /// the short grammar — every surface tells the same story.
+    @Test func summaryTextMatchesDisplay() {
+        let model = SyncthingStatusModel()
+        #expect(model.summaryText == "Syncthing is not running")
+
+        model.update(.running(activity: .syncing, paused: false, attention: false))
+        #expect(model.summaryText == "Syncthing is syncing")
+
+        model.update(.running(activity: .syncing, paused: true, attention: false))
+        #expect(model.summaryText == "Syncthing is paused")
+
+        model.update(.failed("boom"))
+        #expect(model.summaryText == "Syncthing failed — boom")
+    }
+
+    // MARK: Display smoothing
+
+    private func running(_ activity: SyncActivity,
+                         paused: Bool = false,
+                         attention: Bool = false) -> SyncthingStatusModel.Phase {
+        .running(activity: activity, paused: paused, attention: attention)
+    }
+
+    /// Escalation renders immediately at every step — a delay here would
+    /// recreate the missed-flash bug the smoothing exists to fix.
+    @Test func escalationIsImmediate() {
+        let model = SyncthingStatusModel()
+        model.update(running(.idle))
+        #expect(model.display == .running)
+        model.update(running(.scanning))
+        #expect(model.display == .scanning)
+        model.update(running(.syncing))
+        #expect(model.display == .syncing)
+    }
+
+    /// A sub-second episode stays visible: the drop back waits for BOTH the
+    /// minimum-visibility window and the debounce, then lands on the current
+    /// truth.
+    @Test func dropWaitsForMinimumVisibilityAndDebounce() {
+        let model = SyncthingStatusModel()
+        var time = Date(timeIntervalSinceReferenceDate: 0)
+        model.now = { time }
+
+        model.update(running(.syncing))
+        model.update(running(.idle))          // truth drops right away
+        #expect(model.display == .syncing)    // held
+
+        time += 2.9
+        model.applyPendingDrop()
+        #expect(model.display == .syncing)    // < minimumVisibility
+
+        time += 0.2                            // 3.1s shown, 3.1s below
+        model.applyPendingDrop()
+        #expect(model.display == .running)
+    }
+
+    /// After minimum visibility is long satisfied, a drop still debounces:
+    /// truth must stay below the shown level for `dropDebounce`.
+    @Test func dropDebouncesAfterLongEpisode() {
+        let model = SyncthingStatusModel()
+        var time = Date(timeIntervalSinceReferenceDate: 0)
+        model.now = { time }
+
+        model.update(running(.syncing))
+        time += 60                             // a real, long sync episode
+        model.update(running(.idle))
+        time += 1.4
+        model.applyPendingDrop()
+        #expect(model.display == .syncing)    // debounce not elapsed
+        time += 0.2
+        model.applyPendingDrop()
+        #expect(model.display == .running)
+    }
+
+    /// Back-to-back episodes (folder B starts shortly after folder A ends)
+    /// read as one continuous state — the pending drop is cancelled, and no
+    /// intermediate flicker is ever displayed.
+    @Test func reescalationCancelsPendingDrop() {
+        let model = SyncthingStatusModel()
+        var time = Date(timeIntervalSinceReferenceDate: 0)
+        model.now = { time }
+
+        model.update(running(.syncing))
+        time += 10
+        model.update(running(.idle))
+        time += 1.0                            // within the debounce gap
+        model.update(running(.syncing))
+        #expect(model.display == .syncing)
+
+        time += 30                             // the cancelled drop never fires
+        model.applyPendingDrop()
+        #expect(model.display == .syncing)
+    }
+
+    /// Truth moving between LOWER levels keeps the original below-anchor: the
+    /// debounce measures time below the shown level. The drop lands on the
+    /// truth at drop time, not the level truth first dropped to.
+    @Test func dropLandsOnCurrentTruth() {
+        let model = SyncthingStatusModel()
+        var time = Date(timeIntervalSinceReferenceDate: 0)
+        model.now = { time }
+
+        model.update(running(.syncing))
+        time += 10
+        model.update(running(.idle))
+        time += 1.0
+        model.update(running(.scanning))       // still below syncing
+        time += 0.6                            // 1.6s below syncing in total
+        model.applyPendingDrop()
+        #expect(model.display == .scanning)
+    }
+
+    /// Paused, attention, failure, and shutdown bypass smoothing in BOTH
+    /// directions: they render immediately, and no held activity survives
+    /// them — when the override clears, display restarts from current truth.
+    @Test func overridesBypassSmoothingAndResetHold() {
+        let model = SyncthingStatusModel()
+        var time = Date(timeIntervalSinceReferenceDate: 0)
+        model.now = { time }
+
+        model.update(running(.syncing))
+        model.update(running(.syncing, paused: true))
+        #expect(model.display == .paused)      // immediate, despite the hold
+
+        model.update(running(.idle))           // unpaused, now idle
+        #expect(model.display == .running)     // syncing hold did not survive
+
+        model.update(running(.syncing))
+        model.update(.failed("gone"))
+        #expect(model.display == .failed("gone"))
+        model.update(.notRunning)
+        #expect(model.display == .notRunning)
+    }
 }
