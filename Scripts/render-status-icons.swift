@@ -4,20 +4,27 @@
 // 2x = 36px) into the asset catalog. Run from the project root:
 //   swift Scripts/render-status-icons.swift
 //
-// Design system (decided 2026-07-07):
-// - Ink is binary: every stroke full-strength. Mid-alpha in template images is
-//   the system's "disabled" dialect (Apple dims disabled items to ~35%), so
-//   states never dim — the only dimming is the runtime `appearsDisabled` for
-//   "not running".
-// - The frame (loop + two diagonal peer nodes) is the constant identity;
-//   idle's center is empty and every other state puts a full-strength glyph
-//   there: syncing ⇄ (data moving between the peers), paused ‖, error !.
-//   States must differ in center MASS — texture- or outline-level changes
-//   (a dashed ring, arc gaps + arrowheads) are imperceptible at menu-bar size.
-// - The update badge (disc with knocked-out up-arrow) floats on a knockout
-//   halo, SF Symbols-style, instead of merging into the ring's ink. Where it
-//   overlaps a center glyph it occludes cleanly (a depth cue), and glyph
-//   geometry keeps every semantic carrier (arrowheads, the ! stem) visible.
+// Design system (redesigned 2026-08-03, supersedes the 2026-07-07 family;
+// developed in the icon lab with Greg's sketches):
+// - The frame is the SYNCTHING LOGO's geometry: one ring with three rim
+//   nodes at the exact angles measured from the official logo SVG
+//   (syncthing/assets/logo-only.svg): upper-right −26.4°, left +166.0°,
+//   lower-right +49.9° (y-down). Angles are exact; weights are optically
+//   compensated for 18 px (exact-proportion nodes would be ~2.5 px dots).
+// - Ink is binary: every stroke full-strength. Mid-alpha in template images
+//   is the system's "disabled" dialect, so states never dim — the only
+//   dimming is the runtime `appearsDisabled` for "not running".
+// - States differ by center MASS/silhouette in the constant frame:
+//   idle = empty, syncing = ↔ (data exchanged between devices),
+//   paused = ‖, error = ! . Texture-level changes are imperceptible at
+//   menu-bar size.
+// - The update badge sits at the EXACT lower-right node position, fully
+//   replacing it — "that node lights up as the update light". Halo
+//   treatment: the ring opens around a knockout gap and the badge disc
+//   (with a knocked-out up-arrow) floats in it. The badge may graze bare
+//   stroke ends of center glyphs (a depth cue), never a semantic carrier
+//   (arrowheads, the ! stem); the error dot takes the closest approach —
+//   verified acceptable at real size.
 //
 // Black-on-transparent so macOS renders them as templates.
 
@@ -26,31 +33,21 @@ import CoreGraphics
 
 enum IconState { case idle, syncing, paused, error }
 
-let center = CGPoint(x: 12, y: 12)
-let ringRadius: CGFloat = 8.3
+let C = CGPoint(x: 12, y: 12)
+let ringR: CGFloat = 8.0
+let ringStroke: CGFloat = 1.9
+let nodeR: CGFloat = 2.2
 
 func deg(_ d: CGFloat) -> CGFloat { d * .pi / 180 }
 
-/// Stroke an arc ending in an arrowhead that points along the direction of
-/// travel (increasing angle = visually clockwise in the flipped context).
-func arcArrow(_ ctx: CGContext, radius: CGFloat, from a0: CGFloat, to a1: CGFloat, head: CGFloat) {
-    let path = CGMutablePath()
-    path.addArc(center: center, radius: radius, startAngle: a0, endAngle: a1, clockwise: false)
-    ctx.addPath(path)
-    ctx.strokePath()
-    let tip = CGPoint(x: center.x + radius * cos(a1), y: center.y + radius * sin(a1))
-    let t = CGPoint(x: -sin(a1), y: cos(a1))          // direction of travel
-    let n = CGPoint(x: cos(a1), y: sin(a1))           // radial
-    for s: CGFloat in [1, -1] {
-        let wing = CGPoint(x: tip.x - head * t.x + s * head * 0.62 * n.x,
-                           y: tip.y - head * t.y + s * head * 0.62 * n.y)
-        ctx.strokeLineSegments(between: [tip, wing])
-    }
-}
+/// Exact node angles from the official Syncthing logo SVG (y-down, matching
+/// the flipped context). The lower-right node doubles as the update badge's
+/// position.
+let nodeAngles: [CGFloat] = [deg(-26.4), deg(166.0), deg(49.9)]
+let badgeAngle = deg(49.9)
 
-func nodes(_ ctx: CGContext) {
-    ctx.fillEllipse(in: CGRect(x: 6.3 - 2.7, y: 6.3 - 2.7, width: 5.4, height: 5.4))
-    ctx.fillEllipse(in: CGRect(x: 17.7 - 2.7, y: 17.7 - 2.7, width: 5.4, height: 5.4))
+func nodePoint(_ angle: CGFloat) -> CGPoint {
+    CGPoint(x: C.x + ringR * cos(angle), y: C.y + ringR * sin(angle))
 }
 
 func render(_ state: IconState, update: Bool, size: Int) -> Data {
@@ -60,54 +57,64 @@ func render(_ state: IconState, update: Bool, size: Int) -> Data {
                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
     ctx.interpolationQuality = .high
     ctx.scaleBy(x: scale, y: scale)
-    ctx.translateBy(x: 0, y: 24); ctx.scaleBy(x: 1, y: -1)   // top-left origin (SVG-like)
+    ctx.translateBy(x: 0, y: 24); ctx.scaleBy(x: 1, y: -1)   // top-left origin
     ctx.setLineCap(.round); ctx.setLineJoin(.round)
     let black = CGColor(red: 0, green: 0, blue: 0, alpha: 1)
     ctx.setStrokeColor(black); ctx.setFillColor(black)
-    ctx.setLineWidth(2)
+    ctx.setLineWidth(ringStroke)
 
-    // Constant frame: full ring + peer nodes for every state.
-    ctx.strokeEllipse(in: CGRect(x: 12 - ringRadius, y: 12 - ringRadius,
-                                 width: ringRadius * 2, height: ringRadius * 2))
-    nodes(ctx)
-
-    // Syncing: a small nested loop with an arrowhead riding its line —
-    // progress around a cycle. Hollow, so it stays airy where solid center
-    // glyphs read as a blob. The sweep starts top-right and the arrowhead
-    // lands top-left, so the update badge occludes only a bare arc end.
-    if state == .syncing {
-        arcArrow(ctx, radius: 4.0, from: deg(-45), to: deg(255), head: 2.2)
+    // Constant frame: ring + three rim nodes merged into it, like the logo.
+    ctx.strokeEllipse(in: CGRect(x: C.x - ringR, y: C.y - ringR,
+                                 width: ringR * 2, height: ringR * 2))
+    for a in nodeAngles {
+        let p = nodePoint(a)
+        ctx.fillEllipse(in: CGRect(x: p.x - nodeR, y: p.y - nodeR,
+                                   width: nodeR * 2, height: nodeR * 2))
     }
 
-    // Condition glyphs, full strength, in the ring's empty center. Positions
-    // are tuned so the update badge's halo either clears them or occludes
-    // cleanly (no orphaned stubs) — check the update variants after moving.
-    if state == .paused {
+    // Center glyphs.
+    switch state {
+    case .idle:
+        break
+    case .syncing:
+        // Double-headed horizontal arrow: data moving between devices.
+        ctx.setLineWidth(1.8)
+        ctx.strokeLineSegments(between: [CGPoint(x: 8.2, y: 12), CGPoint(x: 15.8, y: 12)])
+        for (tip, dir): (CGFloat, CGFloat) in [(15.8, 1), (8.2, -1)] {
+            ctx.strokeLineSegments(between: [
+                CGPoint(x: tip, y: 12), CGPoint(x: tip - dir * 2.0, y: 12 - 2.0),
+                CGPoint(x: tip, y: 12), CGPoint(x: tip - dir * 2.0, y: 12 + 2.0),
+            ])
+        }
+    case .paused:
         ctx.setLineWidth(2.2)
-        ctx.strokeLineSegments(between: [CGPoint(x: 9.4, y: 9.6), CGPoint(x: 9.4, y: 14.4)])
-        ctx.strokeLineSegments(between: [CGPoint(x: 13.8, y: 9.6), CGPoint(x: 13.8, y: 14.4)])
-    }
-    if state == .error {
+        ctx.strokeLineSegments(between: [CGPoint(x: 10.0, y: 9.5), CGPoint(x: 10.0, y: 14.5)])
+        ctx.strokeLineSegments(between: [CGPoint(x: 14.0, y: 9.5), CGPoint(x: 14.0, y: 14.5)])
+    case .error:
         ctx.setLineWidth(2.2)
-        ctx.strokeLineSegments(between: [CGPoint(x: 12, y: 8.6), CGPoint(x: 12, y: 13.2)])
-        ctx.fillEllipse(in: CGRect(x: 12 - 1.3, y: 16.3 - 1.3, width: 2.6, height: 2.6))
+        ctx.strokeLineSegments(between: [CGPoint(x: 12, y: 8.8), CGPoint(x: 12, y: 13.2)])
+        ctx.fillEllipse(in: CGRect(x: 12 - 1.35, y: 16.2 - 1.35, width: 2.7, height: 2.7))
     }
 
-    // Update badge: knockout halo, filled disc, knocked-out up-arrow.
+    // Update badge at the lower-right node, replacing it (the plain node was
+    // drawn above; the halo clear erases it before the badge disc lands).
     if update {
-        let bx: CGFloat = 17.8, by: CGFloat = 7.8, br: CGFloat = 4.8, halo: CGFloat = 1.0
+        let p = nodePoint(badgeAngle)
+        let br: CGFloat = 4.2, halo: CGFloat = 0.9
         ctx.saveGState()
         ctx.setBlendMode(.clear)
-        ctx.fillEllipse(in: CGRect(x: bx - br - halo, y: by - br - halo,
+        ctx.fillEllipse(in: CGRect(x: p.x - br - halo, y: p.y - br - halo,
                                    width: (br + halo) * 2, height: (br + halo) * 2))
         ctx.restoreGState()
-        ctx.fillEllipse(in: CGRect(x: bx - br, y: by - br, width: br * 2, height: br * 2))
+        ctx.fillEllipse(in: CGRect(x: p.x - br, y: p.y - br, width: br * 2, height: br * 2))
         ctx.saveGState()
         ctx.setBlendMode(.clear)
-        ctx.setLineWidth(1.4)
-        ctx.strokeLineSegments(between: [CGPoint(x: bx, y: by + 2.3), CGPoint(x: bx, y: by - 1.9)])
-        ctx.strokeLineSegments(between: [CGPoint(x: bx - 2.0, y: by + 0.05), CGPoint(x: bx, y: by - 1.9),
-                                         CGPoint(x: bx, y: by - 1.9), CGPoint(x: bx + 2.0, y: by + 0.05)])
+        ctx.setLineWidth(1.35)
+        ctx.strokeLineSegments(between: [CGPoint(x: p.x, y: p.y + 2.1), CGPoint(x: p.x, y: p.y - 1.7)])
+        ctx.strokeLineSegments(between: [
+            CGPoint(x: p.x - 1.8, y: p.y + 0.05), CGPoint(x: p.x, y: p.y - 1.7),
+            CGPoint(x: p.x, y: p.y - 1.7), CGPoint(x: p.x + 1.8, y: p.y + 0.05),
+        ])
         ctx.restoreGState()
     }
 

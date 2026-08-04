@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- A new icon family throughout: the app icon, the menu bar status icons, and the Settings mark now share the Syncthing logo's ring-and-nodes geometry. The app icon is the Syncthing mark inverted — blue on white — with a menu front and center; the menu bar icons show sync (↔), paused, and error states in the same frame, and an available update lights up one of the ring's nodes as a badge.
+
 ## [0.3.1] - 2026-08-03
 
 ### Changed
