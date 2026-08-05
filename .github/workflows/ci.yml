@@ -22,7 +22,7 @@ on:
 jobs:
   build:
     name: Build & Test
-    runs-on: macos-15
+    runs-on: macos-26   # macOS 26 host required: the layered AppIcon.icon compile (ibtoold) crashes when Xcode 26 runs on a macOS 15 host
     steps:
       - name: Checkout
         uses: actions/checkout@v5
