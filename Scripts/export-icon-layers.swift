@@ -6,8 +6,7 @@
 // materials, instead of the legacy-PNG compatibility heuristics that skip
 // the depth treatment on our art). Run from the repo root:
 //   swift Scripts/export-icon-layers.swift
-// Writes into icon-lab/layers/ (untracked). Assembly steps:
-// icon-lab/layers/RECIPE.md.
+// Writes into design/app-icon-layers/ (tracked; see its README.md).
 //
 // Geometry: laid out on the FULL 1024 canvas — Icon Composer's canvas maps
 // edge-to-edge to the icon field (the system supplies the squircle mask),
@@ -71,7 +70,7 @@ for i in 0..<4 {
     quiet += roundedRect(rowX, y, rowW, quietH, quietH * 0.5)
 }
 
-let outDir = "icon-lab/layers"
+let outDir = "design/app-icon-layers"
 try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
 for (name, body) in [("1-mark", mark), ("2-panel", panelSVG),
                      ("3-row-highlight", highlightSVG), ("4-rows-quiet", quiet)] {
