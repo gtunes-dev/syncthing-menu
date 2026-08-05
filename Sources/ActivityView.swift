@@ -459,20 +459,9 @@ private struct TimeCell: View {
 struct ActivityHeaderView: View {
     @ObservedObject var status: SyncthingStatusModel
 
-    /// The app icon pre-sized to display size, so AppKit's rep matching picks
-    /// the exact 64px representation — SwiftUI `.resizable()` resampling from
-    /// the largest rep is what made the 32pt icon look dithered. The icon's
-    /// glow style is inherently soft at this size; accepted (a flat re-render
-    /// was tried 2026-07-21 and looked too unlike the app icon).
-    private static let icon: NSImage = {
-        guard let image = NSApp.applicationIconImage?.copy() as? NSImage else { return NSImage() }
-        image.size = NSSize(width: 32, height: 32)
-        return image
-    }()
-
     var body: some View {
         HStack(spacing: 8) {
-            Image(nsImage: Self.icon)
+            AppIconImage.view(points: 32)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Syncthing Menu")
                     .font(.system(size: 13, weight: .bold))

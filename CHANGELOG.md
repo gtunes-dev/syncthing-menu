@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- A new icon family throughout. The app icon places a frosted-glass menu over the Syncthing mark — same blue, same geometry as the Syncthing icon, with the menu as the centerpiece. The menu bar status icons share the logo's ring-and-nodes frame, showing sync (↔), paused, and error states; an available update lights up one of the ring's nodes as a badge. The Settings mark is a miniature of the app icon.
+- A new icon family throughout. The app icon places a glass menu over the Syncthing mark — same geometry and colors as the Syncthing icon, with the menu as the centerpiece — built in Apple's layered icon format, so on macOS 26 and later it renders with real materials and adapts to dark, clear, and tinted appearances. The menu bar status icons share the logo's ring-and-nodes frame, showing sync (↔), paused, and error states; an available update lights up one of the ring's nodes as a badge. Settings, About, and the Activity window all show the app icon itself.
 
 ## [0.3.1] - 2026-08-03
 

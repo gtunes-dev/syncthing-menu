@@ -17,7 +17,7 @@ struct AboutView: View {
     }
 
     private var appIcon: NSImage {
-        NSApp.applicationIconImage ?? NSImage(named: "AppMark") ?? NSImage()
+        AppIconImage.nsImage(points: 76)
     }
 
     /// Upstream attribution; the version and its release-notes link sit above this line.

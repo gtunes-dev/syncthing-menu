@@ -31,7 +31,7 @@ struct SettingsView: View {
             SettingsCard(title: "Syncthing Menu",
                          version: appVersion,
                          versionURL: appSource.releaseNotesURL(for: appVersion),
-                         icon: { Image("AppMark").resizable().scaledToFit() }) {
+                         icon: { AppIconImage.view(points: 18) }) {
                 UpdateControls(source: appSource, settings: appSettings)
 
                 Divider()
