@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Larger menu bar status icons for readability.
+
 ## [0.3.2] - 2026-08-05
 
 ### Changed

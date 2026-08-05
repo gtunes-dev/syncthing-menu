@@ -11,6 +11,14 @@
 //   (syncthing/assets/logo-only.svg): upper-right −26.4°, left +166.0°,
 //   lower-right +49.9° (y-down). Angles are exact; weights are optically
 //   compensated for 18 px (exact-proportion nodes would be ~2.5 px dots).
+// - Ring GROWN 2026-08-05 (icon-lab ring trial, r95): radius 8.0 → 9.5 for
+//   interior legibility — outer Ø 13.4px → 15.7px at 1x, near Bjango's
+//   ~16pt circular guideline. Center glyphs scale with the interior
+//   (glyphScale); ring stroke / node r / badge stay at their prior optical
+//   sizes — a larger ring needs less amplification, so holding them fixed
+//   drifts back toward the logo's true proportions (and keeps the badge
+//   ink inside the canvas). The binding ink constraint is the LEFT node
+//   (166°): ~0.4px canvas margin at 1x — do not grow the ring further.
 // - Ink is binary: every stroke full-strength. Mid-alpha in template images
 //   is the system's "disabled" dialect, so states never dim — the only
 //   dimming is the runtime `appearsDisabled` for "not running".
@@ -24,7 +32,9 @@
 //   (with a knocked-out up-arrow) floats in it. The badge may graze bare
 //   stroke ends of center glyphs (a depth cue), never a semantic carrier
 //   (arrowheads, the ! stem); the error dot takes the closest approach —
-//   verified acceptable at real size.
+//   verified acceptable at real size (and the graze shrank with the 9.5
+//   ring: the badge moved outward faster than the dot). The halo now clips
+//   the canvas corner — harmless, it's an eraser.
 //
 // Black-on-transparent so macOS renders them as templates.
 
@@ -34,9 +44,13 @@ import CoreGraphics
 enum IconState { case idle, syncing, paused, error }
 
 let C = CGPoint(x: 12, y: 12)
-let ringR: CGFloat = 8.0
+let ringR: CGFloat = 9.5
 let ringStroke: CGFloat = 1.9
 let nodeR: CGFloat = 2.2
+/// Center glyphs were drawn for the original 8.0 ring (interior radius
+/// 7.05); they scale with the interior so they claim the space the larger
+/// ring opened up.
+let glyphScale: CGFloat = (ringR - ringStroke / 2) / 7.05
 
 func deg(_ d: CGFloat) -> CGFloat { d * .pi / 180 }
 
@@ -48,6 +62,11 @@ let badgeAngle = deg(49.9)
 
 func nodePoint(_ angle: CGFloat) -> CGPoint {
     CGPoint(x: C.x + ringR * cos(angle), y: C.y + ringR * sin(angle))
+}
+
+/// Glyph-space point: offset from center in original-ring units, scaled.
+func gp(_ dx: CGFloat, _ dy: CGFloat) -> CGPoint {
+    CGPoint(x: C.x + dx * glyphScale, y: C.y + dy * glyphScale)
 }
 
 func render(_ state: IconState, update: Bool, size: Int) -> Data {
@@ -78,22 +97,23 @@ func render(_ state: IconState, update: Bool, size: Int) -> Data {
         break
     case .syncing:
         // Double-headed horizontal arrow: data moving between devices.
-        ctx.setLineWidth(1.8)
-        ctx.strokeLineSegments(between: [CGPoint(x: 8.2, y: 12), CGPoint(x: 15.8, y: 12)])
-        for (tip, dir): (CGFloat, CGFloat) in [(15.8, 1), (8.2, -1)] {
+        ctx.setLineWidth(1.8 * glyphScale)
+        ctx.strokeLineSegments(between: [gp(-3.8, 0), gp(3.8, 0)])
+        for (tip, dir): (CGFloat, CGFloat) in [(3.8, 1), (-3.8, -1)] {
             ctx.strokeLineSegments(between: [
-                CGPoint(x: tip, y: 12), CGPoint(x: tip - dir * 2.0, y: 12 - 2.0),
-                CGPoint(x: tip, y: 12), CGPoint(x: tip - dir * 2.0, y: 12 + 2.0),
+                gp(tip, 0), gp(tip - dir * 2.0, -2.0),
+                gp(tip, 0), gp(tip - dir * 2.0, 2.0),
             ])
         }
     case .paused:
-        ctx.setLineWidth(2.2)
-        ctx.strokeLineSegments(between: [CGPoint(x: 10.0, y: 9.5), CGPoint(x: 10.0, y: 14.5)])
-        ctx.strokeLineSegments(between: [CGPoint(x: 14.0, y: 9.5), CGPoint(x: 14.0, y: 14.5)])
+        ctx.setLineWidth(2.2 * glyphScale)
+        ctx.strokeLineSegments(between: [gp(-2.0, -2.5), gp(-2.0, 2.5)])
+        ctx.strokeLineSegments(between: [gp(2.0, -2.5), gp(2.0, 2.5)])
     case .error:
-        ctx.setLineWidth(2.2)
-        ctx.strokeLineSegments(between: [CGPoint(x: 12, y: 8.8), CGPoint(x: 12, y: 13.2)])
-        ctx.fillEllipse(in: CGRect(x: 12 - 1.35, y: 16.2 - 1.35, width: 2.7, height: 2.7))
+        ctx.setLineWidth(2.2 * glyphScale)
+        ctx.strokeLineSegments(between: [gp(0, -3.2), gp(0, 1.2)])
+        let dot = gp(0, 4.2), dr = 1.35 * glyphScale
+        ctx.fillEllipse(in: CGRect(x: dot.x - dr, y: dot.y - dr, width: dr * 2, height: dr * 2))
     }
 
     // Update badge at the lower-right node, replacing it (the plain node was
