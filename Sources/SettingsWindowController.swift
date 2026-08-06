@@ -13,17 +13,20 @@ final class SettingsWindowController {
     private let syncthingSource: UpdateSource
     private let loginItem: LoginItemController
     private let folderHealth: FolderHealth
+    private let status: SyncthingStatusModel
 
     init(settings: Settings,
          appSource: UpdateSource,
          syncthingSource: UpdateSource,
          loginItem: LoginItemController,
-         folderHealth: FolderHealth) {
+         folderHealth: FolderHealth,
+         status: SyncthingStatusModel) {
         self.settings = settings
         self.appSource = appSource
         self.syncthingSource = syncthingSource
         self.loginItem = loginItem
         self.folderHealth = folderHealth
+        self.status = status
     }
 
     /// Show the settings window, creating it on first use and re-focusing it
@@ -34,9 +37,16 @@ final class SettingsWindowController {
                                     syncthingSource: syncthingSource,
                                     appSettings: settings.app,
                                     syncthingSettings: settings.syncthing,
+                                    daemonSettings: settings.daemon,
                                     loginItem: loginItem,
-                                    folderHealth: folderHealth)
+                                    folderHealth: folderHealth,
+                                    status: status)
             let hosting = NSHostingController(rootView: root)
+            // The daemon-mode pop-up swaps the Syncthing card's body, so the
+            // content height changes at runtime — let the hosting controller
+            // propagate SwiftUI's size to the window instead of the one-shot
+            // fit below.
+            hosting.sizingOptions = [.preferredContentSize]
             let newWindow = NSWindow(contentViewController: hosting)
             newWindow.title = "Syncthing Menu Settings"
             newWindow.styleMask = [.titled, .closable]   // fixed-size settings panel

@@ -132,6 +132,48 @@ struct SyncthingProcessTests {
         #expect(message.contains("verification"))
     }
 
+    /// `shutdown()` (the daemon-mode switch) is a non-terminal stop: the daemon
+    /// goes down cleanly — never through `.failed` — and, unlike `stop()`, the
+    /// process can `start()` again afterwards (switching back to managed mode).
+    @Test func shutdownStopsNonTerminallyAndAllowsRestart() async throws {
+        let fixture = try StubDaemonFixture(script: Self.stayAlive)
+        defer { fixture.tearDown() }
+
+        fixture.process.start()
+        try await expectEventually(timeout: 15) { fixture.isRunning && fixture.runCount == 1 }
+
+        var completed = false
+        fixture.process.shutdown { completed = true }
+        try await expectEventually(timeout: 15) { completed }
+        #expect(fixture.process.state == .stopped)
+        #expect(!fixture.states.contains { if case .failed = $0 { return true } else { return false } })
+
+        fixture.process.start()
+        try await expectEventually(timeout: 15) { fixture.isRunning && fixture.runCount == 2 }
+    }
+
+    /// A shutdown landing while a `start()` is still preparing off-main must
+    /// cancel the pending spawn (the launch-epoch guard) — a mode switch can
+    /// never leak a managed daemon.
+    @Test func shutdownDuringStartCancelsPendingSpawn() async throws {
+        let fixture = try StubDaemonFixture(script: Self.stayAlive)
+        defer { fixture.tearDown() }
+        // Hold the off-main launch prep at the verification step until released.
+        let gate = DispatchSemaphore(value: 0)
+        fixture.process.verifyBinary = { _ in gate.wait() }
+
+        fixture.process.start()
+        #expect(fixture.process.state == .starting)
+
+        fixture.process.shutdown()
+        #expect(fixture.process.state == .stopped)
+
+        gate.signal()   // prep resumes — its spawn must be refused
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(fixture.runCount == 0)
+        #expect(fixture.process.state == .stopped)
+    }
+
     /// The stop ladder's last rung: a daemon that ignores SIGTERM is SIGKILLed,
     /// and stop() still returns with the process down.
     @Test func stopEscalatesToSIGKILLWhenSIGTERMIgnored() async throws {

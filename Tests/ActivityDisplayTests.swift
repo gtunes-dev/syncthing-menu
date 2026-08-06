@@ -178,6 +178,33 @@ struct ActivityDisplayTests {
         #expect(!model.isRunning)
     }
 
+    /// The self-managed disconnected states: each issue renders its own status
+    /// line, none of them smooth (they aren't activity), and a connected
+    /// self-managed daemon uses the ordinary running grammar.
+    @Test func selfManagedStatusTexts() {
+        let model = SyncthingStatusModel()
+
+        model.update(.selfManaged(.notConfigured))
+        #expect(model.statusText == "Not configured")
+        #expect(model.display == .notConfigured)
+
+        model.update(.selfManaged(.connecting))
+        #expect(model.statusText == "Connecting…")
+
+        model.update(.selfManaged(.unreachable))
+        #expect(model.statusText == "Not reachable")
+        #expect(model.summaryText == "Syncthing is not reachable at the configured address")
+
+        model.update(.selfManaged(.keyRejected))
+        #expect(model.statusText == "API key rejected")
+        #expect(!model.isRunning)
+
+        // Connected: the same running grammar as managed mode.
+        model.update(.running(activity: .syncing, paused: false, attention: false))
+        #expect(model.statusText == "Syncing…")
+        #expect(model.isRunning)
+    }
+
     /// The tooltip/accessibility sentences track the same display state as
     /// the short grammar — every surface tells the same story.
     @Test func summaryTextMatchesDisplay() {

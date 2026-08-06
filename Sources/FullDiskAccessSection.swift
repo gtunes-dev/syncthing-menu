@@ -38,6 +38,42 @@ struct FullDiskAccessSection: View {
     }
 }
 
+/// The self-managed card's counterpart to `FullDiskAccessSection`'s alert
+/// state: shown ONLY while the connected daemon reports permission-blocked
+/// folders — there is no standing section in self-managed mode (decided), and
+/// no reveal-the-binary step either, because we don't know where a daemon we
+/// didn't install lives. What we can honestly offer: name the folders, say
+/// what the fix usually is, and open the Full Disk Access pane.
+struct SelfManagedAccessAlert: View {
+    /// The folder-naming attention message (same wording as the managed alert).
+    let message: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.title3)
+                    .foregroundStyle(Color.orange)
+                Text(message)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("Add the syncthing you run to the Full Disk Access list, then "
+                 + "choose “Rescan All” from the menu-bar menu so it retries right away.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Open Full Disk Access Settings…") {
+                if let url = URL(string:
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+        }
+    }
+}
+
 /// The nested help sheet: explanation, numbered steps, and one button that reveals
 /// the Syncthing binary in Finder and opens the Full Disk Access pane.
 private struct FullDiskAccessHelp: View {

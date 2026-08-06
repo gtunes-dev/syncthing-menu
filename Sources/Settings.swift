@@ -53,22 +53,25 @@ final class UpdateChannelSettings: ObservableObject {
     }
 }
 
-/// App-wide settings: one `UpdateChannelSettings` per update channel. Persisted under
-/// bundle id `io.github.gtunes-dev.SyncthingMenu`. Tests construct their own with an
-/// isolated `UserDefaults`.
+/// App-wide settings: one `UpdateChannelSettings` per update channel, plus the
+/// daemon-mode choice. Persisted under bundle id `io.github.gtunes-dev.SyncthingMenu`
+/// (the self-managed API key in the Keychain). Tests construct their own with an
+/// isolated `UserDefaults` and an in-memory secret store.
 final class Settings {
     static let shared = Settings()
 
     let app: UpdateChannelSettings
     let syncthing: UpdateChannelSettings
+    let daemon: DaemonModeSettings
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, secrets: SecretStore = KeychainSecretStore()) {
         Self.migrateLegacyKeys(in: defaults)
         // Default: check on, install off (surface updates, but don't apply unattended).
         app = UpdateChannelSettings(defaults: defaults, prefix: "app",
                                     autoCheckDefault: true, autoInstallDefault: false)
         syncthing = UpdateChannelSettings(defaults: defaults, prefix: "syncthing",
                                           autoCheckDefault: true, autoInstallDefault: false)
+        daemon = DaemonModeSettings(defaults: defaults, secrets: secrets)
     }
 
     /// One-time rename from the 0.1.x flat keys to the per-channel scheme, so an

@@ -46,6 +46,12 @@ final class SyncthingProcess {
     /// daemon via `beginStop()` (not `stop()`), so a restart never sets this flag.
     private var isTerminating = false
 
+    /// Non-terminal supersession, complementing `isTerminating`: bumped by
+    /// `shutdown()` (the daemon-mode switch), it invalidates an in-flight
+    /// `start()`'s pending spawn without latching the terminal guard — the app
+    /// keeps running and may `start()` again later. Main-thread confined.
+    private var launchEpoch = 0
+
     /// Where we persist *our* chosen GUI port (not in Syncthing's config).
     private static let guiPortDefaultsKey = "syncthing.managedGUIPort"
 
@@ -75,6 +81,7 @@ final class SyncthingProcess {
     /// Launch the daemon. No-op if already running.
     func start() {
         guard !isTerminating, pid == nil else { return }
+        let epoch = launchEpoch
         state = .starting
 
         // Generate (first run) can block briefly, so do prep off-main; the actual
@@ -83,10 +90,10 @@ final class SyncthingProcess {
             guard let self else { return }
             do {
                 let plan = try self.prepareLaunch()
-                DispatchQueue.main.async { self.launchServe(plan: plan) }
+                DispatchQueue.main.async { self.launchServe(plan: plan, epoch: epoch) }
             } catch {
                 DispatchQueue.main.async {
-                    guard !self.isTerminating else { return }
+                    guard !self.isTerminating, epoch == self.launchEpoch else { return }
                     self.state = .failed("Setup failed: \(error.localizedDescription)")
                 }
             }
@@ -111,13 +118,41 @@ final class SyncthingProcess {
     func restart() {
         guard !isTerminating else { return }
         guard let pid = self.pid else { start(); return }
+        let epoch = launchEpoch
         beginStop()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.escalateAndReap(pid)
             DispatchQueue.main.async {
-                guard let self, !self.isTerminating else { return }   // superseded by a quit
+                guard let self, !self.isTerminating,
+                      epoch == self.launchEpoch else { return }   // superseded by a quit/mode switch
                 self.finishStop()
                 self.start()
+            }
+        }
+    }
+
+    /// Stop the daemon *without* latching the terminal guard — the daemon-mode
+    /// switch (managed → self-managed, or clearing the way before a managed
+    /// launch): the app keeps running and may `start()` again later. Bumping
+    /// `launchEpoch` cancels an in-flight `start()`'s pending spawn, so a mode
+    /// switch landing mid-start can't leak a daemon. `completion` runs on main
+    /// once the daemon is down (immediately when nothing is running) — never
+    /// after a terminal `stop()` superseded us, because then the app is exiting.
+    func shutdown(completion: (() -> Void)? = nil) {
+        guard !isTerminating else { return }
+        launchEpoch &+= 1
+        guard let pid = self.pid else {
+            if state != .stopped { state = .stopped }   // an in-flight start was superseded
+            completion?()
+            return
+        }
+        beginStop()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.escalateAndReap(pid)
+            DispatchQueue.main.async {
+                guard let self, !self.isTerminating else { return }
+                self.finishStop()
+                completion?()
             }
         }
     }
@@ -263,9 +298,10 @@ final class SyncthingProcess {
 
     // MARK: - Launch
 
-    private func launchServe(plan: LaunchPlan) {
-        // A terminal stop may have landed while we prepared off-main; never spawn after that.
-        guard !isTerminating else { return }
+    private func launchServe(plan: LaunchPlan, epoch: Int) {
+        // A terminal stop or a mode-switch shutdown may have landed while we
+        // prepared off-main; never spawn after either.
+        guard !isTerminating, epoch == launchEpoch else { return }
         var args = [binaryURL.path, "serve", "--home", homeURL.path, "--no-browser"]
         // Durable daemon log, rotated by Syncthing itself (2 MiB × 3 old files).
         // The daemon TEES to this file — stdout still carries everything

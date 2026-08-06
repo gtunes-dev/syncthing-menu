@@ -109,6 +109,9 @@ final class StatusItemController: NSObject {
         case .running: setDaemonVerbs(visible: true, canStart: false)
         case .starting: setDaemonVerbs(visible: false, canStart: false)
         case .notRunning, .failed: setDaemonVerbs(visible: false, canStart: true)
+        // Self-managed and not connected: no daemon verbs, and no Start either —
+        // starting that daemon is the user's job, not ours.
+        case .selfManaged: setDaemonVerbs(visible: false, canStart: false)
         }
         pauseToggleItem?.title = status.isPaused ? "Resume All Devices" : "Pause All Devices"
         refreshSettingsBadge()
@@ -121,9 +124,9 @@ final class StatusItemController: NSObject {
     /// same fact in words.
     private static func dotColor(for display: SyncthingStatusModel.DisplayState) -> NSColor {
         switch display {
-        case .notRunning: .tertiaryLabelColor
-        case .starting: .systemOrange
-        case .failed: .systemRed
+        case .notRunning, .notConfigured: .tertiaryLabelColor
+        case .starting, .connecting, .unreachable: .systemOrange
+        case .failed, .keyRejected: .systemRed
         case .attention, .paused: .systemOrange
         case .syncing, .scanning, .running: .systemGreen
         }
@@ -273,11 +276,12 @@ final class StatusItemController: NSObject {
         let base: String
         var dimmed = false
         switch status.display {
-        case .failed, .attention: base = "Error"
+        case .failed, .attention, .keyRejected: base = "Error"
         case .paused: base = "Paused"
         case .syncing, .scanning: base = "Syncing"
         case .running: base = "Idle"
-        case .notRunning, .starting: base = "Idle"; dimmed = true
+        case .notRunning, .starting, .notConfigured, .connecting, .unreachable:
+            base = "Idle"; dimmed = true
         }
         let name = "Status\(base)\(updateAvailable ? "Update" : "")"
         let image = NSImage(named: name)

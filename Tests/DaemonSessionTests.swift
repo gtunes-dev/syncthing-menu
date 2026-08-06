@@ -176,6 +176,98 @@ struct DaemonSessionTests {
         #expect(fired == 0)
     }
 
+    // MARK: - Self-managed mode
+
+    /// A self-managed session never writes config we don't own: with the
+    /// invariant off, connecting must not PATCH `autoUpgradeIntervalH` — the
+    /// daemon's update behavior belongs to its user.
+    @Test func selfManagedSessionSkipsUpgradeInvariant() async throws {
+        let server = FakeSyncthingServer(apiKey: "k1")
+        try server.start()
+        defer { server.stop() }
+        let source = FakeEndpointSource(
+            endpoint: .init(guiURL: server.baseURL, apiKey: "k1"))
+        let session = DaemonSession(endpoints: source, enforcesNoSelfUpgrade: false)
+        session.retrySleep = fastSleep
+
+        session.setEndpointExpected(true)
+        try await expectEventually { session.api != nil }
+
+        #expect(server.recordedAutoUpgradeIntervals == [])
+
+        session.setEndpointExpected(false)
+        #expect(session.state == .unavailable)
+        #expect(session.api == nil)
+    }
+
+    /// Probe classification: an answering daemon that rejects the key (403) is
+    /// `apiKeyRejected` — actionable in our Settings — and fixing the key
+    /// recovers without any new input.
+    @Test func wrongKeyClassifiesAsRejectedAndRecovers() async throws {
+        let server = FakeSyncthingServer(apiKey: "right")
+        try server.start()
+        defer { server.stop() }
+        let source = FakeEndpointSource(
+            endpoint: .init(guiURL: server.baseURL, apiKey: "wrong"))
+        let session = DaemonSession(endpoints: source, enforcesNoSelfUpgrade: false)
+        session.retrySleep = fastSleep
+        var failures: [DaemonSession.ProbeFailure] = []
+        session.onProbeFailure = { failures.append($0) }
+
+        session.setEndpointExpected(true)
+        try await expectEventually { failures.contains(.apiKeyRejected) }
+        #expect(session.api == nil)
+
+        source.endpoint = .init(guiURL: server.baseURL, apiKey: "right")
+        try await expectEventually { session.api != nil }
+
+        session.setEndpointExpected(false)
+    }
+
+    /// Probe classification: nothing answering at the address is `unreachable`.
+    @Test func deadEndpointClassifiesAsUnreachable() async throws {
+        let source = FakeEndpointSource(
+            endpoint: .init(guiURL: "http://127.0.0.1:1", apiKey: "k"))
+        let session = DaemonSession(endpoints: source, enforcesNoSelfUpgrade: false)
+        session.retrySleep = fastSleep
+        var failures: [DaemonSession.ProbeFailure] = []
+        session.onProbeFailure = { failures.append($0) }
+
+        session.setEndpointExpected(true)
+        try await expectEventually { failures.contains(.unreachable) }
+        #expect(!failures.contains(.apiKeyRejected))
+
+        session.setEndpointExpected(false)
+    }
+
+    /// Re-arming an expected endpoint (a Settings field edit) supersedes the
+    /// old loop and connects with the freshly-read values immediately — no
+    /// waiting out the previous loop's backoff. And while the source reports
+    /// no endpoint at all ("not configured"), nothing is probed, so no probe
+    /// failure fires — not-configured must never masquerade as unreachable.
+    @Test func reArmingPicksUpEditedEndpoint() async throws {
+        let server = FakeSyncthingServer(apiKey: "k1")
+        try server.start()
+        defer { server.stop() }
+        let source = FakeEndpointSource(endpoint: nil)   // "not configured"
+        let session = DaemonSession(endpoints: source, enforcesNoSelfUpgrade: false)
+        session.retrySleep = fastSleep
+        var failures: [DaemonSession.ProbeFailure] = []
+        session.onProbeFailure = { failures.append($0) }
+
+        session.setEndpointExpected(true)
+        #expect(session.state == .connecting)
+        try await Task.sleep(nanoseconds: 50_000_000)    // several retry rounds
+        #expect(failures.isEmpty)
+
+        source.endpoint = .init(guiURL: server.baseURL, apiKey: "k1")
+        session.setEndpointExpected(true)                // the field-edit bump
+        try await expectEventually { session.api != nil }
+        #expect(failures.isEmpty)
+
+        session.setEndpointExpected(false)
+    }
+
     /// The retry cadence: snappy start (0.5s), doubling, capped at 15s — asserted
     /// through the injected sleeper, no real time spent.
     @Test func retryBackoffDoublesToCap() async throws {

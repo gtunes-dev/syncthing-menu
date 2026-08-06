@@ -10,11 +10,24 @@ struct SettingsView: View {
     @ObservedObject var syncthingSource: UpdateSource
     @ObservedObject var appSettings: UpdateChannelSettings
     @ObservedObject var syncthingSettings: UpdateChannelSettings
+    @ObservedObject var daemonSettings: DaemonModeSettings
     @ObservedObject var loginItem: LoginItemController
     @ObservedObject var folderHealth: FolderHealth
+    @ObservedObject var status: SyncthingStatusModel
 
     private var appVersion: String {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "—"
+    }
+
+    /// The Syncthing card's header version. Managed: the update channel owns it
+    /// ("Not installed" until the first bootstrap). Self-managed: the connected
+    /// daemon's reported version; a plain dash while disconnected — "Not
+    /// installed" would be presumptuous about software we don't manage.
+    private var syncthingVersion: String? {
+        switch daemonSettings.mode {
+        case .managed: syncthingSource.currentVersion
+        case .selfManaged: status.selfManagedDaemonVersion
+        }
     }
 
     /// The FDA section's alert message, when folders are blocked on permissions.
@@ -43,17 +56,56 @@ struct SettingsView: View {
             }
 
             SettingsCard(title: "Syncthing",
-                         version: syncthingSource.currentVersion ?? "Not installed",
-                         versionURL: syncthingSource.currentVersion.flatMap {
+                         version: syncthingVersion
+                             ?? (daemonSettings.mode == .managed ? "Not installed" : "—"),
+                         versionURL: syncthingVersion.flatMap {
                              syncthingSource.releaseNotesURL(for: $0)
                          },
                          icon: { Image("SyncthingLogo").resizable().scaledToFit() }) {
-                UpdateControls(source: syncthingSource, settings: syncthingSettings)
+                // The mode determines everything below it in the card, so it
+                // leads. Sentence-form row ("Syncthing is managed by …"): the
+                // shared subject lives in the label, so the two options differ
+                // only in the dimension being chosen — who manages. Values are
+                // lowercase because they continue the label's sentence.
+                Picker(selection: $daemonSettings.mode) {
+                    Text("managed by this app").tag(DaemonMode.managed)
+                    Text("managed by me").tag(DaemonMode.selfManaged)
+                } label: {
+                    Text("Syncthing is")
+                }
+                .fixedSize()
 
-                Divider()
+                switch daemonSettings.mode {
+                case .managed:
+                    Divider()
 
-                FullDiskAccessSection(binaryURL: ReleaseUpdater.installedBinaryURL,
-                                      attention: fdaAttention)
+                    UpdateControls(source: syncthingSource, settings: syncthingSettings)
+
+                    Divider()
+
+                    FullDiskAccessSection(binaryURL: ReleaseUpdater.installedBinaryURL,
+                                          attention: fdaAttention)
+                case .selfManaged:
+                    Text("Syncthing Menu connects to a Syncthing you run and manage "
+                         + "yourself on this Mac. Starting, stopping, and updates "
+                         + "are up to you.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Divider()
+
+                    SelfManagedConnectionSection(daemonSettings: daemonSettings,
+                                                 status: status)
+
+                    // Attention-only (no standing section — decided): folders the
+                    // connected daemon reports it can't read, with the guidance we
+                    // can honestly give for a binary we didn't install.
+                    if let fdaAttention {
+                        Divider()
+                        SelfManagedAccessAlert(message: fdaAttention)
+                    }
+                }
             }
         }
         .padding(20)
@@ -95,6 +147,107 @@ private struct UpdateControls: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+/// The self-managed connection body: address + API key fields and a live
+/// connection-status row. There is no Test Connection button — the session
+/// probes continuously (field edits re-arm it within a beat), and the status
+/// row *is* the result, so the card tests itself and reports honestly.
+private struct SelfManagedConnectionSection: View {
+    @ObservedObject var daemonSettings: DaemonModeSettings
+    @ObservedObject var status: SyncthingStatusModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Grid(alignment: .leadingFirstTextBaseline,
+                 horizontalSpacing: 10, verticalSpacing: 10) {
+                GridRow {
+                    Text("Address")
+                    // Local instances only, so the host isn't a question — it
+                    // reads as part of the address; only the port is editable.
+                    // The field starts filled with Syncthing's default; the
+                    // placeholder appears only when cleared, and an empty
+                    // field means exactly what the placeholder shows.
+                    HStack(spacing: 5) {
+                        Text("127.0.0.1 :")
+                            .font(.body.monospacedDigit())
+                        TextField(String(SelfManagedEndpoint.defaultPort),
+                                  text: $daemonSettings.selfManagedPort)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.body.monospacedDigit())
+                            .frame(width: 64)
+                        Spacer(minLength: 0)
+                    }
+                }
+                GridRow {
+                    Text("API Key")
+                    // Deliberately not a SecureField: the key is pasted, never
+                    // memorized, and seeing it is the only way to confirm the
+                    // paste — Syncthing's own UI shows it in the clear too.
+                    // (Storage is the Keychain regardless.)
+                    TextField("", text: $daemonSettings.selfManagedAPIKey)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.body.monospaced())
+                        .autocorrectionDisabled()
+                }
+            }
+
+            // Answers the question every user has at exactly this moment.
+            Text("Find the API key in Syncthing's web interface under "
+                 + "Actions → Settings → General.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            ConnectionStatusRow(status: status)
+        }
+    }
+}
+
+/// One connection-status row in the cards' shared status grammar (icon + text,
+/// like the update rows): the session's live verdict, 1:1 on the display state.
+private struct ConnectionStatusRow: View {
+    @ObservedObject var status: SyncthingStatusModel
+
+    private enum RowState {
+        case notConfigured, connecting, connected, unreachable, keyRejected
+    }
+
+    private var rowState: RowState {
+        switch status.display {
+        case .notConfigured: .notConfigured
+        case .unreachable: .unreachable
+        case .keyRejected: .keyRejected
+        case .running, .syncing, .scanning, .paused, .attention: .connected
+        // .connecting, plus managed-mode states that can flash mid-switch.
+        default: .connecting
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            switch rowState {
+            case .notConfigured:
+                Label("Not configured", systemImage: "circle.dashed")
+                    .foregroundStyle(.secondary)
+            case .connecting:
+                ProgressView().controlSize(.small)
+                Text("Connecting…").foregroundStyle(.secondary)
+            case .connected:
+                Label("Connected", systemImage: "checkmark.circle")
+                    .foregroundStyle(.secondary)
+            case .unreachable:
+                Label("Not reachable", systemImage: "exclamationmark.circle")
+                    .foregroundStyle(.orange)
+            case .keyRejected:
+                Label("API key rejected", systemImage: "xmark.circle")
+                    .foregroundStyle(.red)
+            }
+            Spacer()
         }
     }
 }

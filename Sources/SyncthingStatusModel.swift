@@ -27,6 +27,25 @@ final class SyncthingStatusModel: ObservableObject {
         case starting
         case running(activity: SyncActivity, paused: Bool, attention: Bool)
         case failed(String)
+        /// Self-managed mode while not connected. Once connected the phase is
+        /// the same `.running` as managed mode — the monitor feeds the same
+        /// activity truth either way, so the whole icon/status grammar applies.
+        case selfManaged(SelfManagedIssue)
+    }
+
+    /// Why a self-managed connection isn't up. There is no failure-shaped
+    /// terminal state here: the session polls forever, so each of these is a
+    /// live condition that clears by itself once its cause does.
+    enum SelfManagedIssue: Equatable {
+        /// Address or API key not entered yet.
+        case notConfigured
+        /// Probing, no verdict yet (mode just activated or fields just edited).
+        case connecting
+        /// Probes are failing at the connection level — the daemon isn't
+        /// answering at the configured address.
+        case unreachable
+        /// The daemon answered 401/403: a wrong or rotated API key.
+        case keyRejected
     }
 
     /// The phase flattened through THE priority chain — attention > paused >
@@ -37,6 +56,14 @@ final class SyncthingStatusModel: ObservableObject {
         case notRunning
         case starting
         case failed(String)
+        /// Self-managed, fields not filled in yet.
+        case notConfigured
+        /// Self-managed, probing for the daemon.
+        case connecting
+        /// Self-managed, the daemon isn't answering.
+        case unreachable
+        /// Self-managed, the daemon rejected the API key — needs the user.
+        case keyRejected
         /// A folder Syncthing can't access (permission error) — needs the user.
         case attention
         case paused
@@ -53,6 +80,12 @@ final class SyncthingStatusModel: ObservableObject {
 
     /// Truth, straight from the process push + monitor snapshot.
     @Published private(set) var phase: Phase = .notRunning
+
+    /// The self-managed daemon's version (display-normalized, bare semver)
+    /// while connected; nil otherwise. In managed mode the update channel owns
+    /// this fact — in self-managed mode that channel is off, so the Settings
+    /// card header and About read it from here instead.
+    @Published private(set) var selfManagedDaemonVersion: String?
     /// What surfaces render: `phase` through the priority chain, with the
     /// activity ladder smoothed (see the class doc).
     @Published private(set) var display: DisplayState = .notRunning
@@ -83,6 +116,11 @@ final class SyncthingStatusModel: ObservableObject {
         guard new != phase else { return }
         phase = new
         resmooth()
+    }
+
+    func update(selfManagedDaemonVersion version: String?) {
+        guard version != selfManagedDaemonVersion else { return }
+        selfManagedDaemonVersion = version
     }
 
     /// Re-run the smoothing rules after a truth change.
@@ -172,6 +210,10 @@ final class SyncthingStatusModel: ObservableObject {
         case .notRunning: .notRunning
         case .starting: .starting
         case let .failed(message): .failed(message)
+        case .selfManaged(.notConfigured): .notConfigured
+        case .selfManaged(.connecting): .connecting
+        case .selfManaged(.unreachable): .unreachable
+        case .selfManaged(.keyRejected): .keyRejected
         case .running(_, _, true): .attention
         case .running(_, true, _): .paused
         case let .running(activity, _, _):
@@ -191,6 +233,10 @@ final class SyncthingStatusModel: ObservableObject {
         case .notRunning: "Not running"
         case .starting: "Starting…"
         case let .failed(message): message
+        case .notConfigured: "Not configured"
+        case .connecting: "Connecting…"
+        case .unreachable: "Not reachable"
+        case .keyRejected: "API key rejected"
         case .attention: "Can't access some folders"
         case .paused: "Paused"
         case .syncing: "Syncing…"
@@ -206,6 +252,10 @@ final class SyncthingStatusModel: ObservableObject {
         case .notRunning: "Syncthing is not running"
         case .starting: "Syncthing is starting"
         case let .failed(message): "Syncthing failed — \(message)"
+        case .notConfigured: "Not connected to Syncthing — enter its address and API key in Settings"
+        case .connecting: "Connecting to Syncthing"
+        case .unreachable: "Syncthing is not reachable at the configured address"
+        case .keyRejected: "Syncthing rejected the API key — check Settings"
         case .attention:
             "Syncthing can't access some folders — open Settings (Full Disk Access may be needed)"
         case .paused: "Syncthing is paused"

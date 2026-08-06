@@ -17,6 +17,23 @@ final class FakeEndpointSource: EndpointSource {
     }
 }
 
+/// In-memory `SecretStore` — what `KeychainSecretStore` is in production, so
+/// settings tests never touch the real Keychain. Counts reads so tests can pin
+/// the lazy-load contract (init and managed-mode use must never read).
+final class InMemorySecretStore: SecretStore {
+    private(set) var values: [String: String] = [:]
+    private(set) var reads = 0
+
+    func read(_ name: String) -> String? {
+        reads += 1
+        return values[name]
+    }
+
+    func write(_ name: String, value: String) {
+        if value.isEmpty { values[name] = nil } else { values[name] = value }
+    }
+}
+
 struct TimedOutError: Error {}
 
 /// Poll `condition` on the main actor until it holds or `timeout` lapses. The
