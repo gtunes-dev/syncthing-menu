@@ -22,7 +22,21 @@ final class SyncthingProcess {
     var onStateChange: ((State) -> Void)?
 
     private(set) var state: State = .stopped {
-        didSet { onStateChange?(state) }
+        didSet {
+            // The transition trail is the postmortem for spawn failures: a launch
+            // that dies before exec never reaches the daemon's own log file.
+            switch state {
+            case .stopped:
+                Log.process.log("state: stopped")
+            case .starting:
+                Log.process.log("state: starting")
+            case let .running(guiURL):
+                Log.process.log("state: running (\(guiURL, privacy: .public))")
+            case let .failed(message):
+                Log.process.error("state: failed — \(message, privacy: .public)")
+            }
+            onStateChange?(state)
+        }
     }
 
     /// The daemon's API key, read from `config.xml` once running. Used by the REST client.
@@ -41,9 +55,8 @@ final class SyncthingProcess {
 
     /// Latched `true` by `stop()` — the supervisor is terminating and must never
     /// (re)launch the daemon again. This is the single lifecycle guard: `start()`,
-    /// `restart()`, and the launch path all check it, so a quit landing in the middle of
-    /// an in-flight start/restart can't spawn an orphaned daemon. `restart()` stops the
-    /// daemon via `beginStop()` (not `stop()`), so a restart never sets this flag.
+    /// `shutdown()`, and the launch path all check it, so a quit landing in the
+    /// middle of an in-flight start can't spawn an orphaned daemon.
     private var isTerminating = false
 
     /// Non-terminal supersession, complementing `isTerminating`: bumped by
@@ -61,10 +74,9 @@ final class SyncthingProcess {
     var escalationGrace: TimeInterval = 3
 
     /// Verifies the binary's provenance before EVERY spawn (~35ms, off-main in
-    /// launch prep) — fresh launch, Start Syncthing, and the post-upgrade
-    /// re-root all pass through here, so a binary the daemon's self-upgrade
-    /// wrote is checked too. Injectable seam: the process tests spawn unsigned
-    /// stub scripts.
+    /// launch prep) — fresh launch and Start Syncthing both pass through here,
+    /// so a binary the daemon's self-upgrade wrote is checked at the next spawn.
+    /// Injectable seam: the process tests spawn unsigned stub scripts.
     var verifyBinary: (URL) throws -> Void = BinaryVerifier.verifySyncthingBinary
 
     init(binaryURL: URL = ReleaseUpdater.installedBinaryURL,
@@ -80,7 +92,11 @@ final class SyncthingProcess {
 
     /// Launch the daemon. No-op if already running.
     func start() {
-        guard !isTerminating, pid == nil else { return }
+        guard !isTerminating else { return }
+        guard pid == nil else {
+            Log.process.log("start ignored — daemon already running (monitor pid \(self.pid ?? -1))")
+            return
+        }
         let epoch = launchEpoch
         state = .starting
 
@@ -94,6 +110,8 @@ final class SyncthingProcess {
             } catch {
                 DispatchQueue.main.async {
                     guard !self.isTerminating, epoch == self.launchEpoch else { return }
+                    // Full error for the log; the state message stays user-readable.
+                    Log.process.error("launch prep failed: \(String(describing: error), privacy: .public)")
                     self.state = .failed("Setup failed: \(error.localizedDescription)")
                 }
             }
@@ -110,25 +128,6 @@ final class SyncthingProcess {
         beginStop()
         escalateAndReap(pid)
         finishStop()
-    }
-
-    /// Stop and relaunch without blocking the caller. Used after a self-upgrade so the
-    /// monitor re-roots on the canonical `syncthing` (with a fresh disclaim) instead of
-    /// staying backed by the renamed `syncthing.old`. Equivalent to a fresh launch.
-    func restart() {
-        guard !isTerminating else { return }
-        guard let pid = self.pid else { start(); return }
-        let epoch = launchEpoch
-        beginStop()
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.escalateAndReap(pid)
-            DispatchQueue.main.async {
-                guard let self, !self.isTerminating,
-                      epoch == self.launchEpoch else { return }   // superseded by a quit/mode switch
-                self.finishStop()
-                self.start()
-            }
-        }
     }
 
     /// Stop the daemon *without* latching the terminal guard — the daemon-mode
@@ -349,7 +348,7 @@ final class SyncthingProcess {
 
         // STNOUPGRADE: the daemon must never advertise or perform upgrades on its
         // own — Syncthing Menu owns that flow (check via SyncthingReleases, install
-        // via POST /rest/system/upgrade, then the re-root). The flag 501s the
+        // via POST /rest/system/upgrade on explicit consent). The flag 501s the
         // daemon's GET /rest/system/upgrade, which is what empties the Web UI's
         // upgrade banner; the POST is unaffected (verified live on v2.1.1).
         var environment = ProcessInfo.processInfo.environment
@@ -406,7 +405,7 @@ final class SyncthingProcess {
         guiURL = plan.guiURL
         usedGUIAddressOverride = plan.guiAddressOverride != nil
         state = .running(guiURL: plan.guiURL)
-        Log.process.log("daemon started at \(plan.guiURL, privacy: .public) (home: \(self.homeURL.path, privacy: .public))")
+        Log.process.log("daemon started at \(plan.guiURL, privacy: .public) (monitor pid \(newPid), home: \(self.homeURL.path, privacy: .public))")
     }
 
     // MARK: - Disclaimed spawn (TCC responsible process)

@@ -128,8 +128,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // The monitor doubles as the session's health probe: persistent long-poll
         // failure means the endpoint moved or died — let the session reconcile.
+        // The dead stream also means the last snapshot's ACTIVITY is stale (a
+        // wedged worker looks like this; so does a slow worker restart), so drop
+        // it to idle rather than freeze the icon mid-Syncing indefinitely — no
+        // other mechanism corrects it while the session sits in re-verify.
+        // Race-safe by construction: the reconnect's reseed republishes truth
+        // (promptly on a healthy endpoint; bounded by the session's retry
+        // backoff while it stays unreachable — and while unreachable, activity
+        // is genuinely unknown), display smoothing absorbs the dip, and
+        // re-escalation is immediate. Pause and permission-error state are
+        // stickier facts — kept until a real disconnect.
         syncthingMonitor.onEndpointSuspect = { [weak self] in
-            self?.daemonSession?.endpointSuspect()
+            guard let self else { return }
+            self.lastMonitorSnapshot.activity = .idle
+            self.pushStatus()
+            self.daemonSession?.endpointSuspect()
         }
 
         // The monitor's snapshot feeds the status model (which drives the
@@ -141,13 +154,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.folderHealth.permissionErrorFolders = snapshot.permissionErrorFolders
             self.lastMonitorSnapshot = snapshot
             self.pushStatus()
-        }
-
-        // After an upgrade is applied, restart the daemon so its supervisor re-roots on
-        // the canonical `syncthing` binary (fresh disclaim) instead of the renamed
-        // `syncthing.old` that the running monitor would otherwise stay backed by.
-        syncthingUpdateSource.onUpgradeApplied = { [weak self] in
-            self?.syncthingProcess.restart()
         }
 
         // Surface pending updates in the menu (a direct action item per channel)

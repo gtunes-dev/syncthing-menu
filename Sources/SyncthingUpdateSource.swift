@@ -6,15 +6,19 @@ import Foundation
 /// major (`majorNewer` only goes true once no minor is pending), so a major surfaces
 /// alone and waits for explicit consent.
 final class SyncthingUpdateSource: UpdateSource {
-    /// Run after an upgrade settles so the app re-roots the daemon supervisor onto the
-    /// canonical `syncthing` (fresh disclaim) instead of the renamed `syncthing.old`.
-    var onUpgradeApplied: (() -> Void)?
-
     private var api: SyncthingAPI?
 
+    /// The daemon upgrades and restarts itself in place — its monitor re-execs
+    /// onto the canonical `syncthing` (same PID, our supervision and the TCC
+    /// disclaim intact; verified live 2026-08-11, incl. FDA on a protected
+    /// folder) — so nothing needs restarting on our side and the policy layer
+    /// settles the card with a fresh check.
+    override var installCompletesInPlace: Bool { true }
+
     /// Upper bound (seconds) on waiting for a self-upgrade to settle — the daemon
-    /// downloads the new binary from upgrades.syncthing.net, swaps it, and restarts its
-    /// worker. We re-root regardless once this elapses, so it only needs to be generous.
+    /// downloads the new binary from upgrades.syncthing.net, swaps it, and restarts.
+    /// On timeout we give up waiting and let the settle check report whatever is
+    /// actually running, so it only needs to be generous.
     private let upgradeSettleTimeout: TimeInterval = 90
 
     init(settings: UpdateChannelSettings) {
@@ -86,25 +90,70 @@ final class SyncthingUpdateSource: UpdateSource {
     /// Same mechanism for user-initiated and automatic installs: there is no
     /// per-update consent UI on this channel (the click is the consent; release
     /// notes live on the card), so `userInitiated` is unused.
-    override func applyUpdate(userInitiated: Bool) async throws {
-        guard let api else { throw SyncthingAPI.APIError.badURL }
-        // Raw-to-raw comparison, independent of the display normalization.
-        let from = try? await api.systemVersion()
-        // The daemon downloads + SHA-verifies the new binary, renames the running
-        // `syncthing` to `syncthing.old`, writes the new one, and restarts its worker
-        // (its monitor keeps our process alive). Wait for it to come up on the new
-        // version before re-rooting.
-        try await api.performUpgrade()
-        let deadline = Date().addingTimeInterval(upgradeSettleTimeout)
-        while Date() < deadline {
-            if let version = try? await api.systemVersion(), version != from { return }
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-        }
+    /// Thrown when an upgrade can't be confirmed: the pre-upgrade version was
+    /// unreadable (the settle comparison would be unsound) or the daemon never
+    /// came up on a new version within the settle window. Routed through the
+    /// policy layer's failure path — state resets and the error is logged.
+    struct UpgradeSettleError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
     }
 
-    override func didApplyUpdate() {
-        // Re-root the supervisor onto the canonical `syncthing`; its reconnect drives a
-        // fresh check that settles the card.
-        onUpgradeApplied?()
+    override func applyUpdate(userInitiated: Bool) async throws {
+        guard let api else { throw SyncthingAPI.APIError.badURL }
+        // Raw-to-raw comparison, independent of the display normalization. The
+        // pre-upgrade version MUST be readable: with `from` nil, the first
+        // successful read below would satisfy `version != from` and report a
+        // non-upgrade as settled.
+        guard let from = try? await api.systemVersion() else {
+            throw UpgradeSettleError(message: "Couldn't read the running version before upgrading")
+        }
+        // The daemon downloads + SHA-verifies the new binary, renames the running
+        // `syncthing` to `syncthing.old`, writes the new one, and restarts: the
+        // worker exits and the monitor re-execs itself onto the canonical path (our
+        // argv[0]), so the process we supervise ends up backed by the NEW binary
+        // with the disclaim intact. Wait for it to come up on the new version so
+        // the settle check reflects reality. Deliberately NO kill/respawn here:
+        // the old re-root shot a healthy just-booted daemon, blew the stop ladder
+        // (v2 workers shut down slowly right after boot), SIGKILLed the monitor,
+        // and the orphaned worker's DB lock crash-looped the respawn (2026-08-11).
+        try await api.performUpgrade()
+        Log.updates.log("Syncthing upgrade POST accepted (running \(from, privacy: .public))")
+        let started = Date()
+        let deadline = started.addingTimeInterval(upgradeSettleTimeout)
+        while Date() < deadline {
+            // Re-read `self.api` each poll: a config migration can rotate the
+            // key or move the GUI port mid-upgrade, and the session hands the
+            // fresh endpoint to `sessionChanged` — polling only the pre-POST
+            // endpoint would wait out the full timeout against a dead address.
+            let current = self.api ?? api
+            if let version = try? await current.systemVersion(), version != from {
+                Log.updates.log("Syncthing upgrade settled: \(from, privacy: .public) → \(version, privacy: .public) after \(Int(Date().timeIntervalSince(started)))s")
+                verifyInstalledBinary()
+                return
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        // A timeout is a FAILURE. Returning success here would let a
+        // persistently failing upgrade re-offer and, with auto-install on,
+        // re-POST in a ~90s loop with no backoff and no logged error.
+        throw UpgradeSettleError(message: "Syncthing didn't come up on a new version within \(Int(upgradeSettleTimeout))s")
+    }
+
+    /// Detection parity with the removed re-root, which re-ran the pinned
+    /// Developer-ID verification on the daemon-written binary within seconds of
+    /// an upgrade; without this, the next check would wait for the next spawn —
+    /// potentially weeks for a menu-bar app. Off-main (SecStaticCode does I/O)
+    /// and log-only: the binary has already exec'd, so this is detection, not
+    /// prevention — same property the re-root had.
+    private func verifyInstalledBinary() {
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                try BinaryVerifier.verifySyncthingBinary(at: ReleaseUpdater.installedBinaryURL)
+                Log.updates.log("post-upgrade binary verification passed")
+            } catch {
+                Log.updates.error("post-upgrade binary verification FAILED: \(String(describing: error), privacy: .public)")
+            }
+        }
     }
 }

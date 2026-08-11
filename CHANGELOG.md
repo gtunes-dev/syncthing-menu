@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Installing a Syncthing update could leave Syncthing stopped with an error until it was started manually. Updates now finish cleanly, and the Settings card confirms the new version once the update completes.
+- The menu bar icon no longer freezes on stale sync activity when Syncthing stops responding.
+
 ## [0.3.4] - 2026-08-05
 
 ### Added

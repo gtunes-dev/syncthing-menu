@@ -19,8 +19,8 @@ extension SyncthingProcess: EndpointSource {}
 /// discovers it, verifies it answers, applies the enforced invariant (managed
 /// mode only), and publishes a ready-to-use `SyncthingAPI`. Consumers subscribe
 /// to the session and stop caring *why* the endpoint changed — fresh launch,
-/// post-upgrade re-root, and key/port rotation all look identical from their
-/// side. Self-managed mode reuses all of this with a different discovery source
+/// a daemon self-upgrade's restart, and key/port rotation all look identical
+/// from their side. Self-managed mode reuses all of this with a different discovery source
 /// (the user-entered endpoint) and no process driving the lifecycle.
 ///
 /// Main-thread confined like the update policy engine: state, the generation

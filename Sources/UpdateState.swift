@@ -88,6 +88,15 @@ class UpdateSource: ObservableObject {
     /// Whether a major update waits for explicit consent instead of auto-installing.
     let gatesMajorUpdates: Bool
 
+    /// Whether a successful install leaves the app running with the channel still
+    /// reachable (Syncthing: the daemon upgrades and restarts itself in place).
+    /// When true, the policy layer settles the channel after `didApplyUpdate()` —
+    /// `.installing` resets and a fresh check lands the card on Up to date with
+    /// the new version in the header. When false the install ends in app
+    /// termination (the app channel's relaunch), so `.installing` rightly
+    /// persists to the end.
+    var installCompletesInPlace: Bool { false }
+
     /// Cross-channel install serialization; the Settings UI observes its
     /// `installingChannel` to disable the idle card's Update button.
     let coordinator: UpdateInstallCoordinator
@@ -153,6 +162,12 @@ class UpdateSource: ObservableObject {
         isAvailable = true
         epoch &+= 1
         checkInFlight = false
+        // A latched `.installing` can only be here because this availability
+        // bump superseded an in-flight install (the epoch guard makes its
+        // completion a no-op — e.g. an endpoint identity change during the
+        // settle window). Clear it or the card wedges: every check path guards
+        // on `!isInstalling`, and nothing else resets state on this path.
+        if state.isInstalling { state = .unknown }
         if settings.autoCheckEnabled {
             runCheck()
             startPolling()
@@ -193,9 +208,8 @@ class UpdateSource: ObservableObject {
     /// stays offered. Installs are serialized app-wide: if another channel is
     /// mid-install this defers (the state stays `.available`), and the coordinator's
     /// release re-evaluates it for auto-install. The claim is held through
-    /// `didApplyUpdate()` — deliberately not through the daemon's post-upgrade
-    /// re-root/reconnect, which is already safe against a quit or relaunch (a fresh
-    /// spawn *is* the re-root).
+    /// `didApplyUpdate()` and the in-place settle kickoff; the settle check itself
+    /// runs unclaimed (it's an ordinary check, not install work).
     func installAvailable(userInitiated: Bool = true) {
         guard isAvailable, case .available = state else { return }
         guard coordinator.claim(self) else {
@@ -213,11 +227,22 @@ class UpdateSource: ObservableObject {
                 if self.epoch == token { self.state = offered }
                 return
             } catch {
+                // The card resets to unchecked on failure; without this line the
+                // reason would vanish with it.
+                Log.updates.error("\(self.name, privacy: .public): install failed: \(String(describing: error), privacy: .public)")
                 if self.epoch == token { self.state = .unknown }
                 return
             }
             guard self.epoch == token else { return }
             self.didApplyUpdate()
+            if self.installCompletesInPlace {
+                // The channel outlived the install: settle the card off
+                // `.installing` with a fresh check (refreshes the header version
+                // and lands on Up to date). The check runs outside the
+                // coordinator claim — it's an ordinary check, not install work.
+                self.state = .unknown
+                self.runCheck()
+            }
         }
     }
 
@@ -238,6 +263,11 @@ class UpdateSource: ObservableObject {
                 result = try await self.checkForUpdate()
             } catch {
                 if self.epoch == token {
+                    // The version read preceded the failed availability check —
+                    // apply it anyway so the header doesn't show a stale
+                    // version (e.g. the pre-upgrade version after a successful
+                    // install whose settle check flaked).
+                    if let version { self.currentVersion = version }
                     self.state = .unknown
                     self.armRetry()
                 }
@@ -364,7 +394,7 @@ class UpdateSource: ObservableObject {
     /// only then.
     @MainActor func applyUpdate(userInitiated: Bool) async throws {}
 
-    /// Hook run after `applyUpdate()` succeeds (e.g. Syncthing re-roots its daemon).
+    /// Hook run after `applyUpdate()` succeeds, before the in-place settle (if any).
     @MainActor func didApplyUpdate() {}
 
     /// The release-notes page for a version of this channel, if derivable.

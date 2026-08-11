@@ -101,22 +101,6 @@ struct SyncthingProcessTests {
         #expect(fixture.isFailed)
     }
 
-    /// A planned restart (the post-upgrade re-root) stops the old daemon and
-    /// spawns a fresh one, without ever passing through `.failed` — the exit
-    /// watcher is cancelled by `beginStop()`, so the deliberate stop is never
-    /// mistaken for a crash.
-    @Test func plannedRestartSpawnsFreshDaemon() async throws {
-        let fixture = try StubDaemonFixture(script: Self.stayAlive)
-        defer { fixture.tearDown() }
-
-        fixture.process.start()
-        try await expectEventually(timeout: 15) { fixture.isRunning && fixture.runCount == 1 }
-
-        fixture.process.restart()
-        try await expectEventually(timeout: 15) { fixture.isRunning && fixture.runCount == 2 }
-        #expect(!fixture.states.contains { if case .failed = $0 { return true } else { return false } })
-    }
-
     /// The default spawn path verifies provenance: with the real verifier in
     /// place (the fixture normally stubs it out), an unsigned binary is never
     /// spawned — the launch fails before posix_spawn.
