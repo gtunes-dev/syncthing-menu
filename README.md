@@ -57,6 +57,9 @@ update.
   versions always ask first.
 - **The app updates itself via [Sparkle](https://sparkle-project.org)** — only
   for actual changes to the menu-bar app, which are rare.
+- **Or it manages nothing at all.** If you already run Syncthing yourself,
+  Settings can point the app at your instance instead (see
+  [Using your own Syncthing](#using-your-own-syncthing)).
 
 ## The menu
 
@@ -71,19 +74,34 @@ Click the menu-bar icon for:
 - **Start Syncthing** — appears when the daemon is stopped or has failed.
 - **Update … to X** — a direct install action per channel, appearing only while
   that update is pending.
+- **Activity…** — a live, file-by-file view of what Syncthing is doing (below).
 - **Settings…** — update preferences for both channels, Open at login, and Full
   Disk Access setup. Carries a caution badge when a folder needs attention.
-- **Quit** — stops the daemon cleanly, then exits.
+- **About Syncthing Menu** — versions and release-notes links for both.
+- **Quit** — stops the daemon it manages, then exits.
 
 The menu-bar icon itself reflects state: a quiet monochrome mark when all is
 well, distinct marks while syncing or paused, an alert mark when the daemon
 can't run or a folder needs attention, and a badged variant when an update is
 available. Its tooltip always carries the full one-line story.
 
+## Activity
+
+A live view of what Syncthing is doing, file by file: each change, which device
+made it, and its progress from detected through delivered, applied, or failed.
+Rows filter by change type and origin and sort by any column, and the window can
+be pinned above others. Holding ⌥ over the menu item turns it into **Activity
+(Reset Layout)…**. The window costs nothing while closed.
+
+<p align="center">
+  <img src="docs/activity.png" alt="The Syncthing Menu Activity window" width="760">
+</p>
+
 ## Permissions
 
-Syncthing runs as a background process that the app manages directly, so on a
-couple of occasions macOS may ask you to grant it access. This is expected.
+When the app manages Syncthing, it launches the daemon directly as a background
+process, so on a couple of occasions macOS may ask you to grant it access. This
+is expected.
 
 ### Local Network
 
@@ -105,7 +123,8 @@ won't help.
 
 ## Updates
 
-Two independent update channels, surfaced as matching cards in Settings:
+Two independent update channels, surfaced as matching cards in Settings (the
+Syncthing channel only while the app manages the daemon):
 
 - **Syncthing (the daemon):** auto-check is on by default. Automatic install of
   *minor* updates is off by default (you can turn it on); *major* updates always
@@ -121,6 +140,18 @@ last checked.
 <p align="center">
   <img src="docs/settings.png" alt="The Syncthing Menu Settings window" width="440">
 </p>
+
+## Using your own Syncthing
+
+Already running Syncthing yourself? In Settings, set **Syncthing is** →
+**managed by me** and give it the port and API key of your local instance — the
+key is in Syncthing's web interface under *Actions → Settings → General*. The
+card reports the live connection state as you type.
+
+The app is then purely an interface: menu, status, folders, and Activity work as
+usual, but it never downloads, starts, stops, or updates Syncthing, and quitting
+leaves your daemon running. Everything above describes the default, **managed by
+this app**.
 
 ## Troubleshooting & reporting a problem
 
@@ -138,8 +169,8 @@ To capture recent history for a bug report:
 log show --last 2h --predicate 'subsystem == "io.github.gtunes-dev.SyncthingMenu"' > syncthing-menu.log
 ```
 
-The Syncthing daemon also keeps its own rotating log file, which survives app
-restarts:
+The daemon the app manages also keeps its own rotating log file, which survives
+app restarts:
 
 ```
 ~/Library/Application Support/Syncthing Menu/home/syncthing.log
@@ -153,7 +184,9 @@ paths, device names and IDs, and local network addresses. Issues are public.
 
 ## Building
 
-Requires Xcode 16 or later.
+Requires Xcode 26 on a macOS 26 host. The project format itself needs only
+Xcode 16, but the layered `AppIcon.icon` compiles only on macOS 26 — which is
+what CI uses.
 
 ```sh
 # Open in Xcode and run, or build unsigned from the CLI:
@@ -170,31 +203,19 @@ To run a locally signed build from Xcode, set your team in the target's
 ## Project layout
 
 ```
-Sources/                 Swift sources + asset catalog (file-system-synchronized group)
-  main.swift             Explicit entry point (NSApplication setup)
-  AppDelegate.swift      Lifecycle owner and wiring
-  StatusItemController.swift   Menu-bar item, menu, and state-driven icon
-  SyncthingProcess.swift Daemon supervisor (spawn / graceful stop / restart)
-  DaemonSession.swift    Endpoint discovery + automatic reconnection
-  SyncthingMonitor.swift Live daemon state + folder health, over the events API
-  SyncthingAPI.swift     Syncthing REST client
-  SyncthingConfig.swift  Reads the daemon's config.xml (never writes it)
-  ReleaseUpdater.swift   Daemon binary download + verification + install
-  BinaryVerifier.swift   Developer ID signature check, pinned to Syncthing's team
-  SyncthingReleases.swift  Client-side update check (port of Syncthing's own)
-  UpdateState.swift      Shared update policy engine (UpdateSource) + install coordinator
-  SyncthingUpdateSource.swift  Syncthing update channel (REST)
-  AppUpdateSource.swift  App update channel (Sparkle, silent background install)
-  ReleaseNotes*.swift    Release-notes URLs + link view
-  Settings*.swift        Settings window + view
-  FullDiskAccessSection.swift  FDA explainer + help sheet
-  Log.swift              Unified-log categories (one subsystem)
+Sources/                 Swift sources, asset catalog, and the layered app icon
 Tests/                   Unit + integration tests (Swift Testing; run with Scripts/test.sh)
 Config/                  Info.plist + entitlements (referenced via build settings)
-Scripts/                 test.sh, sign-and-notarize.sh, dev/render helpers
-.github/workflows/       ci.yml (build + tests), release.yml
+Scripts/                 test.sh, release + notarization, icon and dev helpers
+design/                  Icon and logo design sources
+docs/                    Screenshots used by this README
+.github/workflows/       ci.yml (build + tests), release.yml, soak-build.yml
 SyncthingMenu.xcodeproj  App + test targets
 ```
+
+`Sources/` is a file-system-synchronized Xcode group: adding a file to the
+directory adds it to the target, with no project edit needed. Each source file
+opens with a comment explaining its role.
 
 ## Distribution identity
 
