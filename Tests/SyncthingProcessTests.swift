@@ -41,6 +41,7 @@ private final class StubDaemonFixture {
 
         process = SyncthingProcess(binaryURL: binary, homeURL: home)
         process.escalationGrace = 0.2
+        process.shutdownGraces = (rest: 0.2, term: 0.2)
         process.verifyBinary = { _ in }   // the stubs are unsigned scripts
         process.onStateChange = { [weak self] in self?.states.append($0) }
     }
@@ -83,6 +84,17 @@ struct SyncthingProcessTests {
     while :; do sleep 0.2; done
     """
 
+    /// A "monitor" that forks a TERM-immune "worker" (pid written beside RUNS),
+    /// then itself ignores TERM — forcing the ladder to SIGKILL the monitor and
+    /// sweep the orphaned child.
+    private static let forkingIgnoreSIGTERM = """
+    #!/bin/sh
+    echo run >> RUNS
+    trap '' TERM
+    sh -c 'trap "" TERM; echo $$ > RUNS.worker; while :; do sleep 0.2; done' &
+    while :; do sleep 0.2; done
+    """
+
     /// An unexpected exit surfaces as `.failed` with the exit reason, and
     /// deliberately does not respawn — detection without remediation is the
     /// decided behavior (worker crashes are Syncthing's own monitor's job).
@@ -99,6 +111,48 @@ struct SyncthingProcessTests {
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(fixture.runCount == 1)
         #expect(fixture.isFailed)
+    }
+
+    /// A planned restart (the post-upgrade re-root) stops the old daemon and
+    /// spawns a fresh one, without ever passing through `.failed` — the exit
+    /// watcher is cancelled by `beginStop()`, so the deliberate stop is never
+    /// mistaken for a crash.
+    @Test func plannedRestartSpawnsFreshDaemon() async throws {
+        let fixture = try StubDaemonFixture(script: Self.stayAlive)
+        defer { fixture.tearDown() }
+
+        fixture.process.start()
+        try await expectEventually(timeout: 15) { fixture.isRunning && fixture.runCount == 1 }
+
+        fixture.process.restart()
+        try await expectEventually(timeout: 15) { fixture.isRunning && fixture.runCount == 2 }
+        #expect(!fixture.states.contains { if case .failed = $0 { return true } else { return false } })
+    }
+
+    /// The stop ladder reaps the WHOLE process tree: if the monitor has to be
+    /// SIGKILLed, its child (the "worker") must not survive as an orphan — a
+    /// surviving worker holds the daemon's database lock and would crash-loop
+    /// any respawn (the 2026-08-11 production failure). The stub ignores
+    /// SIGTERM and forks a child that also ignores it, so the ladder must reach
+    /// SIGKILL and then sweep the child.
+    @Test func stopLadderReapsOrphanedWorker() async throws {
+        let fixture = try StubDaemonFixture(script: Self.forkingIgnoreSIGTERM)
+        defer { fixture.tearDown() }
+
+        fixture.process.start()
+        try await expectEventually(timeout: 15) { fixture.isRunning }
+        let workerPidFile = fixture.runsFile.path + ".worker"
+        try await expectEventually(timeout: 15) {
+            FileManager.default.fileExists(atPath: workerPidFile)
+        }
+        let text = try String(contentsOfFile: workerPidFile, encoding: .utf8)
+        let worker = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines))!
+
+        var completed = false
+        fixture.process.shutdown { completed = true }
+        try await expectEventually(timeout: 15) { completed }
+        #expect(kill(worker, 0) == -1)   // the orphan was reaped, not leaked
+        #expect(fixture.process.state == .stopped)
     }
 
     /// The default spawn path verifies provenance: with the real verifier in

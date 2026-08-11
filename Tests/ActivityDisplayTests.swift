@@ -241,6 +241,30 @@ struct ActivityDisplayTests {
         #expect(model.display == .syncing)
     }
 
+    /// While a Syncthing update is applying, the display reads Updating…
+    /// through the whole window's churn (running → stopped → starting) — but a
+    /// real failure still surfaces, and clearing the flag restores truth.
+    @Test func updatingMasksChurnButNotFailure() {
+        let model = SyncthingStatusModel()
+        model.update(running(.scanning))
+        model.update(updatingSyncthing: true)
+        #expect(model.display == .updating)
+        #expect(model.statusText == "Updating…")
+
+        model.update(.notRunning)                  // re-root: daemon stopping
+        #expect(model.display == .updating)
+        model.update(.starting)                    // re-root: fresh spawn
+        #expect(model.display == .updating)
+
+        model.update(.failed("Syncthing exited (code 1)"))
+        #expect(model.display == .failed("Syncthing exited (code 1)"))
+
+        model.update(.starting)
+        model.update(running(.idle))
+        model.update(updatingSyncthing: false)
+        #expect(model.display == .running)
+    }
+
     /// A sub-second episode stays visible: the drop back waits for BOTH the
     /// minimum-visibility window and the debounce, then lands on the current
     /// truth.

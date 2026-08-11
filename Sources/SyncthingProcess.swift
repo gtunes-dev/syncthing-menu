@@ -55,8 +55,10 @@ final class SyncthingProcess {
 
     /// Latched `true` by `stop()` — the supervisor is terminating and must never
     /// (re)launch the daemon again. This is the single lifecycle guard: `start()`,
-    /// `shutdown()`, and the launch path all check it, so a quit landing in the
-    /// middle of an in-flight start can't spawn an orphaned daemon.
+    /// `restart()`, `shutdown()`, and the launch path all check it, so a quit
+    /// landing in the middle of an in-flight start/restart can't spawn an
+    /// orphaned daemon. `restart()` stops the daemon via `beginStop()` (not
+    /// `stop()`), so a restart never sets this flag.
     private var isTerminating = false
 
     /// Non-terminal supersession, complementing `isTerminating`: bumped by
@@ -69,9 +71,21 @@ final class SyncthingProcess {
     private static let guiPortDefaultsKey = "syncthing.managedGUIPort"
 
     /// How long each rung of the stop ladder (REST → SIGTERM → SIGKILL) waits
-    /// before escalating. Injectable seam: the process tests run the ladder
+    /// before escalating on the TERMINAL stop (`stop()`, which blocks the
+    /// quitting main thread). Injectable seam: the process tests run the ladder
     /// without real multi-second waits.
     var escalationGrace: TimeInterval = 3
+
+    /// Ladder graces for the NON-terminal stops (`restart()` — the post-upgrade
+    /// re-root — and `shutdown()`, the mode switch). More patient than the quit
+    /// ladder: the reap runs off-main, and a just-booted worker legitimately
+    /// needs >6s to close its database — 3s+3s impatience is what SIGKILLed the
+    /// monitor and orphaned the worker on the DB lock in the 2026-08-11
+    /// failed-update incident. Not unbounded either: after an upgrade this
+    /// stop is also what ends the swap's TCC exposure (see `restart()`), so the
+    /// worst case stays tens of seconds, with `reapOrphanedWorkers` making the
+    /// SIGKILL rung safe. Injectable seam.
+    var shutdownGraces: (rest: TimeInterval, term: TimeInterval) = (15, 5)
 
     /// Verifies the binary's provenance before EVERY spawn (~35ms, off-main in
     /// launch prep) — fresh launch and Start Syncthing both pass through here,
@@ -126,8 +140,40 @@ final class SyncthingProcess {
         isTerminating = true            // latch: never relaunch after a terminal stop (quit)
         guard let pid = self.pid else { return }
         beginStop()
-        escalateAndReap(pid)
+        escalateAndReap(pid, restGrace: escalationGrace, termGrace: escalationGrace)
         finishStop()
+    }
+
+    /// Stop and relaunch without blocking the caller — the post-upgrade re-root.
+    /// The daemon has already swapped its binary and restarted itself, but the
+    /// surviving monitor PID carries the swap's TCC baggage: during the rename
+    /// dance its executable path read `syncthing.old`, and tccd's evaluation of
+    /// that identity can stick to the PID (the 2026-08-11 FDA incident — folder
+    /// permissions broken until relaunch). A fresh spawn — new PID, fresh
+    /// disclaim, canonical path — is the only thing that definitively ends it.
+    /// Runs the patient `shutdownGraces` ladder plus worker reaping: the
+    /// just-booted worker stops gracefully, and nothing can survive holding the
+    /// database lock when the fresh daemon spawns.
+    func restart() {
+        guard !isTerminating else { return }
+        guard let pid = self.pid else {
+            Log.process.log("restart with no daemon tracked — starting fresh")
+            start()
+            return
+        }
+        Log.process.log("restart: stopping monitor pid \(pid)")
+        let epoch = launchEpoch
+        beginStop()
+        let graces = shutdownGraces
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.escalateAndReap(pid, restGrace: graces.rest, termGrace: graces.term)
+            DispatchQueue.main.async {
+                guard let self, !self.isTerminating,
+                      epoch == self.launchEpoch else { return }   // superseded by a quit/mode switch
+                self.finishStop()
+                self.start()
+            }
+        }
     }
 
     /// Stop the daemon *without* latching the terminal guard — the daemon-mode
@@ -146,8 +192,9 @@ final class SyncthingProcess {
             return
         }
         beginStop()
+        let graces = shutdownGraces
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.escalateAndReap(pid)
+            self?.escalateAndReap(pid, restGrace: graces.rest, termGrace: graces.term)
             DispatchQueue.main.async {
                 guard let self, !self.isTerminating else { return }
                 self.finishStop()
@@ -178,25 +225,74 @@ final class SyncthingProcess {
     }
 
     /// Block until the daemon exits, escalating REST → SIGTERM → SIGKILL. Logs which
-    /// stage actually stopped it (and how long it took).
-    private func escalateAndReap(_ pid: pid_t) {
+    /// stage actually stopped it (and how long it took). The ladder acts on the
+    /// MONITOR (the pid we spawned); afterwards `reapOrphanedWorkers` confirms the
+    /// worker died too — the ladder is not done while any lock-holder survives.
+    private func escalateAndReap(_ pid: pid_t, restGrace: TimeInterval, termGrace: TimeInterval) {
+        // Snapshot the monitor's children BEFORE stopping: if the ladder ever
+        // reaches SIGKILL, the monitor dies alone and the worker survives as an
+        // orphan still holding the database lock — a respawn would crash-loop
+        // on it (the 2026-08-11 failed-update incident).
+        let workers = Self.childPIDs(of: pid)
+        defer { reapOrphanedWorkers(workers) }
+
         let start = Date()
         func elapsed() -> String { String(format: "%.1fs", Date().timeIntervalSince(start)) }
 
-        if waitForExit(pid, escalationGrace) {
+        if waitForExit(pid, restGrace) {
             Log.process.log("stopped via REST shutdown (\(elapsed(), privacy: .public))")
             return
         }
-        Log.process.log("REST shutdown didn't complete in \(self.escalationGrace)s — falling back to SIGTERM")
+        Log.process.log("REST shutdown didn't complete in \(restGrace)s — falling back to SIGTERM")
         kill(pid, SIGTERM)
-        if waitForExit(pid, escalationGrace) {
+        if waitForExit(pid, termGrace) {
             Log.process.log("stopped via SIGTERM (\(elapsed(), privacy: .public))")
             return
         }
-        Log.process.log("SIGTERM didn't complete in \(self.escalationGrace)s — sending SIGKILL")
+        Log.process.log("SIGTERM didn't complete in \(termGrace)s — sending SIGKILL")
         kill(pid, SIGKILL)
         _ = waitForExit(pid, 2)
         Log.process.log("stopped via SIGKILL (\(elapsed(), privacy: .public))")
+    }
+
+    /// Wait briefly for the monitor's children to exit (in a graceful stop they
+    /// die before the monitor does, so this is normally an instant no-op), then
+    /// SIGKILL any survivor: after the ladder nothing supervises them, and a
+    /// surviving worker holds the daemon's database lock.
+    private func reapOrphanedWorkers(_ workers: [pid_t]) {
+        for worker in workers {
+            if waitForDeath(worker, 3) { continue }
+            Log.process.log("worker \(worker) survived the monitor — sending SIGKILL")
+            kill(worker, SIGKILL)
+            if !waitForDeath(worker, 2) {
+                Log.process.error("worker \(worker) did not exit after SIGKILL")
+            }
+        }
+    }
+
+    /// Poll until `pid` no longer exists (kill-0 probe; workers are
+    /// grandchildren, so `waitpid` doesn't apply). PID reuse inside this
+    /// seconds-scale window is not a realistic concern.
+    private func waitForDeath(_ pid: pid_t, _ seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while kill(pid, 0) == 0 {
+            if Date() >= deadline { return false }
+            usleep(50_000)
+        }
+        return true
+    }
+
+    /// The live child PIDs of `pid`, via libproc. Empty on any failure — the
+    /// ladder then degrades to its old monitor-only behavior.
+    private static let procPPIDOnly: UInt32 = 6   // PROC_PPID_ONLY (proc_info.h)
+    static func childPIDs(of pid: pid_t) -> [pid_t] {
+        var pids = [pid_t](repeating: 0, count: 64)
+        let bytes = pids.withUnsafeMutableBufferPointer {
+            proc_listpids(procPPIDOnly, UInt32(pid),
+                          $0.baseAddress, Int32($0.count * MemoryLayout<pid_t>.size))
+        }
+        guard bytes > 0 else { return [] }
+        return Array(pids.prefix(Int(bytes) / MemoryLayout<pid_t>.size)).filter { $0 > 0 }
     }
 
     /// Poll `waitpid` until the process is reaped or `seconds` elapse; returns whether reaped.

@@ -56,6 +56,12 @@ final class SyncthingStatusModel: ObservableObject {
         case notRunning
         case starting
         case failed(String)
+        /// A Syncthing update is being applied (Settings shows Installing…).
+        /// Masks the update window's churn — quiesce wait, daemon self-restart,
+        /// our re-root's stop/start — behind one honest word. Never masks
+        /// `.failed` (a spawn failure mid-update must surface) or the
+        /// self-managed states (that channel never updates).
+        case updating
         /// Self-managed, fields not filled in yet.
         case notConfigured
         /// Self-managed, probing for the daemon.
@@ -122,6 +128,17 @@ final class SyncthingStatusModel: ObservableObject {
         guard version != selfManagedDaemonVersion else { return }
         selfManagedDaemonVersion = version
     }
+
+    /// Whether the Syncthing channel is applying an update (fed from the
+    /// install coordinator). While true, the display reads Updating… instead
+    /// of the underlying churn — see `DisplayState.updating`.
+    func update(updatingSyncthing: Bool) {
+        guard updatingSyncthing != self.updatingSyncthing else { return }
+        self.updatingSyncthing = updatingSyncthing
+        refreshDisplay()
+    }
+
+    private var updatingSyncthing = false
 
     /// Re-run the smoothing rules after a truth change.
     private func resmooth() {
@@ -206,7 +223,13 @@ final class SyncthingStatusModel: ObservableObject {
     }
 
     private func currentDisplay() -> DisplayState {
-        switch phase {
+        if updatingSyncthing {
+            switch phase {
+            case .notRunning, .starting, .running: return .updating
+            case .failed, .selfManaged: break
+            }
+        }
+        return switch phase {
         case .notRunning: .notRunning
         case .starting: .starting
         case let .failed(message): .failed(message)
@@ -232,6 +255,7 @@ final class SyncthingStatusModel: ObservableObject {
         switch display {
         case .notRunning: "Not running"
         case .starting: "Starting…"
+        case .updating: "Updating…"
         case let .failed(message): message
         case .notConfigured: "Not configured"
         case .connecting: "Connecting…"
@@ -251,6 +275,7 @@ final class SyncthingStatusModel: ObservableObject {
         switch display {
         case .notRunning: "Syncthing is not running"
         case .starting: "Syncthing is starting"
+        case .updating: "Syncthing is updating"
         case let .failed(message): "Syncthing failed — \(message)"
         case .notConfigured: "Not connected to Syncthing — enter its address and API key in Settings"
         case .connecting: "Connecting to Syncthing"

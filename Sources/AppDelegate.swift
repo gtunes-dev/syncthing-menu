@@ -156,6 +156,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.pushStatus()
         }
 
+        // After an upgrade settles, re-root the daemon supervisor: a fresh spawn
+        // (new PID, fresh disclaim, canonical binary) ends the swap's TCC
+        // exposure — see SyncthingUpdateSource.onUpgradeApplied for the full
+        // story. The idle gate feeds the mechanism live activity so the POST
+        // lands on a quiet daemon (both observed `syncthing.old` permission
+        // incidents fired mid-scan).
+        syncthingUpdateSource.onUpgradeApplied = { [weak self] in
+            self?.syncthingProcess.restart()
+        }
+        syncthingUpdateSource.isDaemonBusy = { [weak self] in
+            guard let self else { return false }
+            return self.lastMonitorSnapshot.activity != .idle
+        }
+
         // Surface pending updates in the menu (a direct action item per channel)
         // and on the menu-bar icon (one arrow for either; the tooltip names
         // versions). While one channel installs, the other's item is disabled —
@@ -168,6 +182,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.statusItemController?.update(
                     appUpdate: Self.pendingUpdate(appState, enabled: idle),
                     syncthingUpdate: Self.pendingUpdate(syncState, enabled: idle))
+                // The menu's status line says Updating… for the whole install
+                // window (quiesce → swap → re-root) instead of the phase churn.
+                self?.syncthingStatus.update(
+                    updatingSyncthing: installing != nil
+                        && installing === self?.syncthingUpdateSource)
             }
             .store(in: &cancellables)
 

@@ -105,13 +105,20 @@ final class StatusItemController: NSObject {
         // the menu line stays a one-glance summary.
         setStatus(dot: Self.dotColor(for: status.display),
                   detail: Self.truncate(status.statusText, to: 60))
-        switch status.phase {
-        case .running: setDaemonVerbs(visible: true, canStart: false)
-        case .starting: setDaemonVerbs(visible: false, canStart: false)
-        case .notRunning, .failed: setDaemonVerbs(visible: false, canStart: true)
-        // Self-managed and not connected: no daemon verbs, and no Start either —
-        // starting that daemon is the user's job, not ours.
-        case .selfManaged: setDaemonVerbs(visible: false, canStart: false)
+        if status.display == .updating {
+            // Mid-update the phase churns through running/stopped/starting; a
+            // flickering verb list — or a Start Syncthing offer while our own
+            // re-root is mid-flight — would be noise. One quiet line.
+            setDaemonVerbs(visible: false, canStart: false)
+        } else {
+            switch status.phase {
+            case .running: setDaemonVerbs(visible: true, canStart: false)
+            case .starting: setDaemonVerbs(visible: false, canStart: false)
+            case .notRunning, .failed: setDaemonVerbs(visible: false, canStart: true)
+            // Self-managed and not connected: no daemon verbs, and no Start either —
+            // starting that daemon is the user's job, not ours.
+            case .selfManaged: setDaemonVerbs(visible: false, canStart: false)
+            }
         }
         pauseToggleItem?.title = status.isPaused ? "Resume All Devices" : "Pause All Devices"
         refreshSettingsBadge()
@@ -125,7 +132,7 @@ final class StatusItemController: NSObject {
     private static func dotColor(for display: SyncthingStatusModel.DisplayState) -> NSColor {
         switch display {
         case .notRunning, .notConfigured: .tertiaryLabelColor
-        case .starting, .connecting, .unreachable: .systemOrange
+        case .starting, .updating, .connecting, .unreachable: .systemOrange
         case .failed, .keyRejected: .systemRed
         case .attention, .paused: .systemOrange
         case .syncing, .scanning, .running: .systemGreen
@@ -280,7 +287,7 @@ final class StatusItemController: NSObject {
         case .paused: base = "Paused"
         case .syncing, .scanning: base = "Syncing"
         case .running: base = "Idle"
-        case .notRunning, .starting, .notConfigured, .connecting, .unreachable:
+        case .notRunning, .starting, .updating, .notConfigured, .connecting, .unreachable:
             base = "Idle"; dimmed = true
         }
         let name = "Status\(base)\(updateAvailable ? "Update" : "")"

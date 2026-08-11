@@ -17,9 +17,6 @@ private final class FakeUpdateSource: UpdateSource {
     private(set) var didApplyCount = 0
     private(set) var lastUserInitiated: Bool?
 
-    var completesInPlace = false
-    override var installCompletesInPlace: Bool { completesInPlace }
-
     override func fetchVersion() async -> String? { version }
 
     override func checkForUpdate() async throws -> UpdateState {
@@ -258,9 +255,9 @@ struct UpdateSourcePolicyTests {
         try await expectEventually { source.didApplyCount == 1 }
         #expect(source.applyCount == 1)
         #expect(source.lastUserInitiated == false)
-        // Success leaves .installing on a terminal channel (the default): the
-        // mechanism's completion hands off to an app relaunch. An in-place
-        // channel (installCompletesInPlace) settles instead — pinned separately.
+        // Success leaves .installing: the mechanism's completion hands off to a
+        // relaunch (app) or the daemon re-root's availability bounce (Syncthing),
+        // which resets the channel via makeUnavailable/makeAvailable.
         #expect(source.state == .installing)
     }
 
@@ -345,29 +342,6 @@ struct UpdateSourcePolicyTests {
         #expect(coordinator.installingChannel == nil)
     }
 
-    /// A channel whose install completes in place (Syncthing: the daemon swaps
-    /// the binary and restarts itself) settles off `.installing` with a fresh
-    /// check — the card lands on Up to date with the new version, never a stuck
-    /// "Installing…".
-    @Test func inPlaceInstallSettlesWithFreshCheck() async throws {
-        let source = await makeSource(autoCheck: true, autoInstall: false)
-        source.completesInPlace = true
-        source.checkResult = .success(.available(version: "2.0.0", isMajor: false))
-        source.makeAvailable()
-        try await expectEventually {
-            source.state == .available(version: "2.0.0", isMajor: false)
-        }
-
-        // A successful apply changes the mechanism's world: the settle check
-        // reads the new version and reports up to date.
-        source.checkResult = .success(.upToDate)
-        source.version = "2.0.0"
-        source.installAvailable()
-        try await expectEventually { source.state == .upToDate }
-        #expect(source.didApplyCount == 1)
-        #expect(source.currentVersion == "2.0.0")
-    }
-
     /// An availability bump mid-install (an endpoint identity change during the
     /// settle window) supersedes the install: `makeAvailable` clears the latched
     /// `.installing` so the card recovers instead of wedging, and the parked
@@ -395,8 +369,9 @@ struct UpdateSourcePolicyTests {
         #expect(source.didApplyCount == 0)
     }
 
-    /// The default (app channel): a successful apply keeps `.installing` — the
-    /// install ends in a relaunch, and flipping the card back early would lie.
+    /// A successful apply keeps `.installing` — completion belongs to the
+    /// channel's own reset (the app's relaunch; the daemon re-root's
+    /// availability bounce), and flipping the card back early would lie.
     @Test func terminalInstallStaysInstalling() async throws {
         let source = await makeSource(autoCheck: true, autoInstall: false)
         source.checkResult = .success(.available(version: "2.0.0", isMajor: false))
