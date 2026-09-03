@@ -88,9 +88,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         activityController.onVisibilityChange = { [weak self] visible in
             self?.activityFeed.setWindowVisible(visible)
         }
-        // The window's toolbar verbs are the menu's verbs — same handlers.
-        activityController.onRescanAll = { [weak self] in self?.rescanAll() }
-        activityController.onPauseToggle = { [weak self] pause in self?.setAllDevicesPaused(pause) }
         activityWindowController = activityController
 
         let controller = StatusItemController(

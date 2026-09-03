@@ -30,6 +30,12 @@ final class FakeSyncthingServer {
         /// "folder is paused" for them (mirrors the real daemon, verified
         /// live 2026-08-03).
         var paused = false
+        /// Folder type as the config reports it ("sendreceive" / "sendonly"
+        /// / "receiveonly") — drives the feed's delivery expectation.
+        var type = "sendreceive"
+        /// Device ids the folder is shared with, ourselves included. nil =
+        /// shared with every configured device (the common test setup).
+        var sharedWith: [String]? = nil
         /// Current scan/pull errors, served by /rest/folder/errors.
         var errors: [(path: String, error: String)] = []
     }
@@ -47,11 +53,6 @@ final class FakeSyncthingServer {
 
     private var events: [(id: Int, json: [String: Any])] = []
     private var nextEventID = 1
-
-    /// The always-on disk-events ring (/rest/events/disk) — scripted history
-    /// for ActivityFeed's seeding path.
-    private var diskEvents: [[String: Any]] = []
-    private var nextDiskEventID = 1
 
     /// Every request path (with query) the server received, in order — lets
     /// tests assert what traffic DID and DIDN'T happen (e.g. the activity
@@ -127,22 +128,41 @@ final class FakeSyncthingServer {
     /// degradation path.
     private var _remoteNeeds: [String: (names: [String], perpage: Int)] = [:]
 
+    /// Scripted /rest/db/file authorship, keyed by "folder|path". Unscripted
+    /// paths get a 404 — the "lookup failed, origin stays —" degradation path.
+    private var _fileAuthors: [String: String] = [:]
+
+    /// Scripted /rest/db/completion, keyed by "folder|device". Unscripted
+    /// pairs get a 404 — how the real daemon answers for a device that
+    /// doesn't share the folder.
+    private var _completions: [String: (needItems: Int, needDeletes: Int)] = [:]
+
+    /// Script one device's position for one folder (needItems + needDeletes;
+    /// completion % derived: 100 when both are zero, else 50).
+    func setCompletion(folder: String, device: String, needItems: Int, needDeletes: Int = 0) {
+        queue.sync { _completions["\(folder)|\(device)"] = (needItems, needDeletes) }
+    }
+
+    /// Script the `modifiedBy` (short device id) one db/file query returns.
+    func setFileAuthor(folder: String, path: String, modifiedBy: String) {
+        queue.sync { _fileAuthors["\(folder)|\(path)"] = modifiedBy }
+    }
+
+    /// Scripted /rest/db/file availability (full device ids), keyed by
+    /// "folder|path".
+    private var _fileAvailability: [String: [String]] = [:]
+
+    /// Script which devices already have the file (db/file `availability`).
+    func setFileAvailability(folder: String, path: String, devices: [String]) {
+        queue.sync { _fileAvailability["\(folder)|\(path)"] = devices }
+    }
+
     /// Script the need list one remoteneed query returns. `perpage` echoes in
     /// the response; setting it to `names.count` models a truncated (full)
     /// page, whose absences must not be trusted.
     func setRemoteNeed(folder: String, device: String, names: [String],
                        perpage: Int = 1000) {
         queue.sync { _remoteNeeds["\(folder)|\(device)"] = (names, perpage) }
-    }
-
-    /// Append one event to the disk-events history (/rest/events/disk).
-    func seedDiskEvent(type: String, data: [String: Any]) {
-        queue.sync {
-            let id = nextDiskEventID
-            nextDiskEventID += 1
-            diskEvents.append(["id": id, "globalID": id, "type": type,
-                               "time": "2026-01-01T00:00:00Z", "data": data])
-        }
     }
 
     // MARK: - Lifecycle
@@ -187,13 +207,23 @@ final class FakeSyncthingServer {
     /// Append an event (ids are 1-based and monotonic, like a fresh daemon
     /// subscription) and release any parked long-poll that should see it.
     func pushEvent(type: String, data: [String: Any] = [:]) {
+        pushEvents([(type: type, data: data)])
+    }
+
+    /// Append several events ATOMICALLY: parked long-polls release once, with
+    /// the whole batch — how a real daemon delivers events that accumulated
+    /// between polls. Lets tests exercise same-batch behavior (e.g. the
+    /// feed's ItemStarted+ItemFinished collapse) deterministically.
+    func pushEvents(_ batch: [(type: String, data: [String: Any])]) {
         queue.sync {
-            let id = nextEventID
-            nextEventID += 1
-            events.append((id: id, json: [
-                "id": id, "globalID": id, "type": type,
-                "time": "2026-01-01T00:00:00Z", "data": data,
-            ]))
+            for item in batch {
+                let id = nextEventID
+                nextEventID += 1
+                events.append((id: id, json: [
+                    "id": id, "globalID": id, "type": item.type,
+                    "time": "2026-01-01T00:00:00Z", "data": item.data,
+                ]))
+            }
             let parked = waiters
             waiters = []
             for waiter in parked {
@@ -296,8 +326,12 @@ final class FakeSyncthingServer {
                 ($0.deviceID, ["connected": $0.connected])
             })], on: connection)
         case ("GET", "/rest/config/folders"):
-            send(_folders.map { ["id": $0.id, "label": $0.label, "path": $0.path,
-                                 "paused": $0.paused] }, on: connection)
+            send(_folders.map { folder in
+                ["id": folder.id, "label": folder.label, "path": folder.path,
+                 "paused": folder.paused, "type": folder.type,
+                 "devices": (folder.sharedWith ?? _devices.map(\.deviceID))
+                     .map { ["deviceID": $0] }] as [String: Any]
+            }, on: connection)
         case ("GET", "/rest/db/status"):
             let state = _folders.first { $0.id == query["folder"] }?.state ?? "idle"
             send(["state": state], on: connection)
@@ -312,6 +346,31 @@ final class FakeSyncthingServer {
             send(["folder": folder.id, "page": 1, "perpage": 100,
                   "errors": folder.errors.map { ["path": $0.path, "error": $0.error] }],
                  on: connection)
+        case ("GET", "/rest/db/completion"):
+            guard let folder = query["folder"], let device = query["device"],
+                  let entry = _completions["\(folder)|\(device)"] else {
+                send(["error": "no such object"], status: 404, on: connection)
+                return
+            }
+            send(["completion": entry.needItems + entry.needDeletes == 0 ? 100.0 : 50.0,
+                  "needItems": entry.needItems, "needDeletes": entry.needDeletes],
+                 on: connection)
+        case ("GET", "/rest/db/file"):
+            guard let folder = query["folder"], let file = query["file"] else {
+                send(["error": "no such object"], status: 404, on: connection)
+                return
+            }
+            let author = _fileAuthors["\(folder)|\(file)"]
+            let availability = _fileAvailability["\(folder)|\(file)"]
+            guard author != nil || availability != nil else {
+                send(["error": "no such object"], status: 404, on: connection)
+                return
+            }
+            var payload: [String: Any] = [
+                "availability": (availability ?? []).map { ["id": $0, "fromTemporary": false] }
+            ]
+            if let author { payload["global"] = ["modifiedBy": author] }
+            send(payload, on: connection)
         case ("GET", "/rest/db/remoteneed"):
             guard let folder = query["folder"], let device = query["device"],
                   let entry = _remoteNeeds["\(folder)|\(device)"] else {
@@ -322,14 +381,6 @@ final class FakeSyncthingServer {
                   "page": 1, "perpage": entry.perpage], on: connection)
         case ("GET", "/rest/events"):
             handleEvents(query, on: connection)
-        case ("GET", "/rest/events/disk"):
-            // The real endpoint is an always-on ring with history; a one-shot
-            // read (what the feed's seeding does) never parks.
-            var matching = diskEvents
-            if let limit = query["limit"].flatMap(Int.init) {
-                matching = Array(matching.suffix(limit))
-            }
-            send(matching, on: connection)
         default:
             send(["error": "not found"], status: 404, on: connection)
         }

@@ -5,13 +5,15 @@ import SwiftUI
 /// identity, global state, and the window's verbs live in the unified title
 /// bar (`ActivityWindowController`), so the content area is pure data.
 ///
-/// Column design (see the row model in `ActivityFeed`): a row's three
-/// orthogonal facts each get their own column — Operation (static glyph)
-/// with State (glyph, the ONLY dynamic column) immediately beside it so the
-/// two read as one compound fact ("🗑 ↓" = remote delete applied), then the
-/// prose columns. Status words live in tooltips + accessibility labels;
-/// color reinforces, never alone. Motion in the table always means one
-/// thing: a journey state advanced.
+/// Column design (see the log model in `ActivityFeed`): each entry is an
+/// immutable logical event — the Event column (verb + glyph: what happened),
+/// then Name, Folder, Device, Time. A deletion marks itself on the Name
+/// (strikethrough — see `NameCell`; the dedicated operation column was
+/// removed 2026-08-18 as near-constant noise). Full status words live in
+/// the Event column itself; color reinforces, never alone. New rows
+/// appearing is the ONLY motion — entries never mutate, so nothing in the
+/// table ever jumps or re-sorts on its own. (Verb wording and glyph choices
+/// are provisional pending the visual-language pass.)
 ///
 /// Trailing-space note (investigated at length 2026-07-22/23): blank
 /// header-styled space after the Time column is mostly NATIVE chrome — the
@@ -30,7 +32,7 @@ struct ActivityView: View {
         // 10s-quantized warning timestamps). A single top-down state change
         // per minute keeps the cells timer-free.
         TimelineView(.periodic(from: .now, by: 60)) { context in
-            let visible = feed.rows.filter(display.allows)
+            let visible = feed.entries.filter(display.allows)
                 .sorted(using: display.effectiveSortOrder)
             VStack(spacing: 0) {
                 // A filtered feed must LOOK filtered — a quiet list under an
@@ -41,12 +43,12 @@ struct ActivityView: View {
                 }
                 Group {
                     if visible.isEmpty {
-                        emptyFeed(filtered: display.isActive && !feed.rows.isEmpty)
+                        emptyFeed(filtered: display.isActive && !feed.entries.isEmpty)
                     } else if #available(macOS 14.0, *) {
-                        CustomizableFeedTable(rows: visible, sortOrder: sortBinding,
+                        CustomizableFeedTable(entries: visible, sortOrder: sortBinding,
                                               now: context.date)
                     } else {
-                        LegacyFeedTable(rows: visible, sortOrder: sortBinding,
+                        LegacyFeedTable(entries: visible, sortOrder: sortBinding,
                                         now: context.date)
                     }
                 }
@@ -60,13 +62,13 @@ struct ActivityView: View {
     /// Time (oldest first) is almost never what an activity log wants, and
     /// Finder treats its date columns the same way. Toggling Time once it's
     /// already the sort column behaves normally.
-    private var sortBinding: Binding<[KeyPathComparator<ActivityFeed.Row>]> {
+    private var sortBinding: Binding<[KeyPathComparator<ActivityFeed.Entry>]> {
         Binding {
             display.sortOrder
         } set: { new in
-            if let first = new.first, first.keyPath == \ActivityFeed.Row.time,
+            if let first = new.first, first.keyPath == \ActivityFeed.Entry.time,
                first.order == .forward,
-               display.sortOrder.first?.keyPath != \ActivityFeed.Row.time {
+               display.sortOrder.first?.keyPath != \ActivityFeed.Entry.time {
                 display.sortOrder = ActivityDisplayModel.defaultSortOrder
             } else {
                 display.sortOrder = new
@@ -97,7 +99,10 @@ struct ActivityView: View {
     }
 
     /// An empty window must explain itself: what will appear, that nothing
-    /// being here is normal — or that a filter is hiding what IS here.
+    /// being here is normal — or that a filter is hiding what IS here. When
+    /// a name search comes up empty while the log holds BULK entries, say
+    /// so: the searched-for file may be inside a count (bulk entries carry
+    /// no paths), and silence would read as "my file didn't sync".
     private func emptyFeed(filtered: Bool) -> some View {
         VStack(spacing: 8) {
             Image(systemName: filtered ? "line.3.horizontal.decrease" : "tray")
@@ -109,6 +114,12 @@ struct ActivityView: View {
                 Text("Filters are hiding the current activity.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
+                if !display.searchText.isEmpty,
+                   feed.entries.contains(where: { $0.bulkCount != nil }) {
+                    Text("Some changes were recorded in bulk and can't be matched by name.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
                 Button("Clear Filters") { display.clear() }
                     .controlSize(.small)
             } else {
@@ -122,19 +133,32 @@ struct ActivityView: View {
 }
 
 /// The Activity window's display state: the filter (two independent groups
-/// matching the row model's two static facts — direction and operation; a
-/// row shows iff its direction AND its operation are enabled; journey state
-/// is a possible third group later) and the sort order (Finder-style single
-/// sort column, Name as tiebreaker). Display-only and deliberately
-/// transient: everything here resets with the app — a persisted hidden
-/// filter is the "syncing broke" trap in durable form.
+/// over an entry's static facts — direction and operation; an entry shows
+/// iff its direction AND its operation are enabled; event kind is a possible
+/// third group later) and the sort order (Finder-style single sort column,
+/// Name as tiebreaker). Display-only and deliberately transient: everything
+/// here resets with the app — a persisted hidden filter is the "syncing
+/// broke" trap in durable form.
 final class ActivityDisplayModel: ObservableObject {
-    @Published var showLocal = true
-    @Published var showRemote = true
+    /// Direction is a property of the verb: detections and the
+    /// sending/delivered kinds are outbound — changes from this Mac; the
+    /// item kinds are inbound — changes from other devices. The popover's
+    /// "Changed On" labels stay truthful under that mapping.
+    @Published var showOutbound = true
+    @Published var showInbound = true
     @Published var showModified = true
     @Published var showDeleted = true
 
-    static let defaultSortOrder = [KeyPathComparator(\ActivityFeed.Row.time, order: .reverse)]
+    /// The toolbar search field's text: case-insensitive substring match
+    /// against the folder-relative path (a superset of "part of a
+    /// filename"). Brute force over ≤500 retained entries — trivially cheap,
+    /// and it doubles as the episode lens: searching a filename shows that
+    /// file's lifecycle thread in order. Bulk entries carry no path, so they
+    /// never match a non-empty search (documented boundary of the aggregate
+    /// tier; the empty state says so). Transient like every filter here.
+    @Published var searchText = ""
+
+    static let defaultSortOrder = [KeyPathComparator(\ActivityFeed.Entry.time, order: .reverse)]
 
     /// The user's chosen sort (default: newest first). The Table binding
     /// writes it; display sorting applies `effectiveSortOrder`.
@@ -142,30 +166,35 @@ final class ActivityDisplayModel: ObservableObject {
 
     /// The applied sort: the chosen column, then Name as tiebreaker (unless
     /// Name IS the chosen column).
-    var effectiveSortOrder: [KeyPathComparator<ActivityFeed.Row>] {
+    var effectiveSortOrder: [KeyPathComparator<ActivityFeed.Entry>] {
         var order = sortOrder
-        if sortOrder.first?.keyPath != \ActivityFeed.Row.path {
-            order.append(KeyPathComparator(\ActivityFeed.Row.path,
+        if sortOrder.first?.keyPath != \ActivityFeed.Entry.path {
+            order.append(KeyPathComparator(\ActivityFeed.Entry.path,
                                            comparator: String.StandardComparator.localizedStandard))
         }
         return order
     }
 
     var isActive: Bool {
-        !(showLocal && showRemote && showModified && showDeleted)
+        !(showOutbound && showInbound && showModified && showDeleted
+            && searchText.isEmpty)
     }
 
-    func allows(_ row: ActivityFeed.Row) -> Bool {
-        (row.isLocalOrigin ? showLocal : showRemote)
-            && (row.operation == .deleted ? showDeleted : showModified)
+    func allows(_ entry: ActivityFeed.Entry) -> Bool {
+        (entry.kind.isOutbound ? showOutbound : showInbound)
+            && (entry.operation == .deleted ? showDeleted : showModified)
+            && (searchText.isEmpty
+                || entry.path.localizedCaseInsensitiveContains(searchText))
     }
 
     /// Clear the FILTERS only (the filter bar's ✕ / Clear Filters buttons).
+    /// The search text is part of the view's scoping, so it clears too.
     func clear() {
-        showLocal = true
-        showRemote = true
+        showOutbound = true
+        showInbound = true
         showModified = true
         showDeleted = true
+        searchText = ""
     }
 
     /// Factory reset (the menu's ⌥ alternate): filters AND sort.
@@ -175,11 +204,12 @@ final class ActivityDisplayModel: ObservableObject {
     }
 
     /// The filter bar's full reading. Grammar: "Showing <what> [from
-    /// <where>]" — <what> is the selected change type, or "changes" when
-    /// both types are on and only the location constrains; an impossible
-    /// selection (either group fully unchecked) reads "Showing no changes".
+    /// <where>] [matching “<text>”]" — <what> is the selected change type,
+    /// or "changes" when both types are on and only location or search
+    /// constrains; an impossible selection (either checkbox group fully
+    /// unchecked) reads "Showing no changes".
     var summary: String {
-        if (!showModified && !showDeleted) || (!showLocal && !showRemote) {
+        if (!showModified && !showDeleted) || (!showOutbound && !showInbound) {
             return "Showing no changes"
         }
         var text = "Showing "
@@ -188,8 +218,11 @@ final class ActivityDisplayModel: ObservableObject {
         } else {
             text += "changes"
         }
-        if showLocal != showRemote {
-            text += showLocal ? " from this Mac" : " from other devices"
+        if showOutbound != showInbound {
+            text += showOutbound ? " from this Mac" : " from other devices"
+        }
+        if !searchText.isEmpty {
+            text += " matching “\(searchText)”"
         }
         return text
     }
@@ -209,8 +242,8 @@ struct ActivityFilterPopoverView: View {
                 .padding(.vertical, 4)
             Text("Changed On")
                 .font(.subheadline.weight(.semibold))
-            Toggle("This Mac", isOn: $display.showLocal)
-            Toggle("Other Devices", isOn: $display.showRemote)
+            Toggle("This Mac", isOn: $display.showOutbound)
+            Toggle("Other Devices", isOn: $display.showInbound)
         }
         .toggleStyle(.checkbox)
         .padding(14)
@@ -239,19 +272,20 @@ extension Notification.Name {
 /// The macOS 13 fallback below renders the same columns without persistence.
 @available(macOS 14.0, *)
 private struct CustomizableFeedTable: View {
-    let rows: [ActivityFeed.Row]
-    @Binding var sortOrder: [KeyPathComparator<ActivityFeed.Row>]
+    let entries: [ActivityFeed.Entry]
+    @Binding var sortOrder: [KeyPathComparator<ActivityFeed.Entry>]
     let now: Date
-    @State private var customization: TableColumnCustomization<ActivityFeed.Row>
+    @State private var customization: TableColumnCustomization<ActivityFeed.Entry>
 
-    init(rows: [ActivityFeed.Row], sortOrder: Binding<[KeyPathComparator<ActivityFeed.Row>]>,
+    init(entries: [ActivityFeed.Entry],
+         sortOrder: Binding<[KeyPathComparator<ActivityFeed.Entry>]>,
          now: Date) {
-        self.rows = rows
+        self.entries = entries
         self._sortOrder = sortOrder
         self.now = now
         if let data = UserDefaults.standard.data(forKey: ActivityColumnStore.defaultsKey),
            let saved = try? JSONDecoder().decode(
-               TableColumnCustomization<ActivityFeed.Row>.self, from: data) {
+               TableColumnCustomization<ActivityFeed.Entry>.self, from: data) {
             _customization = State(initialValue: saved)
         } else {
             _customization = State(initialValue: .init())
@@ -259,42 +293,31 @@ private struct CustomizableFeedTable: View {
     }
 
     var body: some View {
-        Table(rows, sortOrder: $sortOrder, columnCustomization: $customization) {
-            // Single-SPACE titles: an empty-string title suppresses the
-            // native sort caret entirely; a space reads as an empty header
-            // while giving the indicator an anchor when the column sorts.
-            // Empty-title glyph columns at 40pt: the native sort caret
-            // needs header room — it silently disappears below ~33-40pt
-            // (bisected empirically on macOS 27; 24 and 32 suppress it, 40
-            // shows it). The title text is irrelevant. Glyphs center in the
-            // wider cells.
-            TableColumn("", value: \.operationSortKey) { row in
-                OperationGlyph(operation: row.operation)
+        Table(entries, sortOrder: $sortOrder, columnCustomization: $customization) {
+            TableColumn("Event", value: \.kindSortKey) { entry in
+                EventCell(kind: entry.kind)
             }
-            .width(40)
-            TableColumn("", value: \.stateSortKey) { row in
-                StatusGlyph(state: row.state)
-            }
-            .width(40)
+            .width(min: 90, ideal: 120)
+            .customizationID("event")
             TableColumn("Name", value: \.path,
-                        comparator: String.StandardComparator.localizedStandard) { row in
-                NameCell(path: row.path)
+                        comparator: String.StandardComparator.localizedStandard) { entry in
+                NameCell(entry: entry)
             }
             .customizationID("name")
             TableColumn("Folder", value: \.folderLabel,
-                        comparator: String.StandardComparator.localizedStandard) { row in
-                Text(row.folderLabel).foregroundStyle(.secondary)
+                        comparator: String.StandardComparator.localizedStandard) { entry in
+                Text(entry.folderLabel).foregroundStyle(.secondary)
             }
             .width(min: 60, ideal: 110)
             .customizationID("folder")
-            TableColumn("Changed By", value: \.originDisplay,
-                        comparator: String.StandardComparator.localizedStandard) { row in
-                OriginCell(row: row)
+            TableColumn("Device", value: \.partyDisplay,
+                        comparator: String.StandardComparator.localizedStandard) { entry in
+                PartyCell(entry: entry)
             }
             .width(min: 60, ideal: 90)
-            .customizationID("from")
-            TableColumn("Time", value: \.time) { row in
-                TimeCell(time: row.time, now: now)
+            .customizationID("device")
+            TableColumn("Time", value: \.time) { entry in
+                TimeCell(time: entry.time, now: now)
             }
             .width(min: 70, ideal: 90)
             .customizationID("time")
@@ -312,41 +335,32 @@ private struct CustomizableFeedTable: View {
 
 /// macOS 13: same columns, no width persistence (the customization API is 14+).
 private struct LegacyFeedTable: View {
-    let rows: [ActivityFeed.Row]
-    @Binding var sortOrder: [KeyPathComparator<ActivityFeed.Row>]
+    let entries: [ActivityFeed.Entry]
+    @Binding var sortOrder: [KeyPathComparator<ActivityFeed.Entry>]
     let now: Date
 
     var body: some View {
-        Table(rows, sortOrder: $sortOrder) {
-            // Empty-title glyph columns at 40pt: the native sort caret
-            // needs header room — it silently disappears below ~33-40pt
-            // (bisected empirically on macOS 27; 24 and 32 suppress it, 40
-            // shows it). The title text is irrelevant. Glyphs center in the
-            // wider cells.
-            TableColumn("", value: \.operationSortKey) { row in
-                OperationGlyph(operation: row.operation)
+        Table(entries, sortOrder: $sortOrder) {
+            TableColumn("Event", value: \.kindSortKey) { entry in
+                EventCell(kind: entry.kind)
             }
-            .width(40)
-            TableColumn("", value: \.stateSortKey) { row in
-                StatusGlyph(state: row.state)
-            }
-            .width(40)
+            .width(min: 90, ideal: 120)
             TableColumn("Name", value: \.path,
-                        comparator: String.StandardComparator.localizedStandard) { row in
-                NameCell(path: row.path)
+                        comparator: String.StandardComparator.localizedStandard) { entry in
+                NameCell(entry: entry)
             }
             TableColumn("Folder", value: \.folderLabel,
-                        comparator: String.StandardComparator.localizedStandard) { row in
-                Text(row.folderLabel).foregroundStyle(.secondary)
+                        comparator: String.StandardComparator.localizedStandard) { entry in
+                Text(entry.folderLabel).foregroundStyle(.secondary)
             }
             .width(min: 60, ideal: 110)
-            TableColumn("Changed By", value: \.originDisplay,
-                        comparator: String.StandardComparator.localizedStandard) { row in
-                OriginCell(row: row)
+            TableColumn("Device", value: \.partyDisplay,
+                        comparator: String.StandardComparator.localizedStandard) { entry in
+                PartyCell(entry: entry)
             }
             .width(min: 60, ideal: 90)
-            TableColumn("Time", value: \.time) { row in
-                TimeCell(time: row.time, now: now)
+            TableColumn("Time", value: \.time) { entry in
+                TimeCell(time: entry.time, now: now)
             }
             .width(min: 70, ideal: 90)
         }
@@ -355,80 +369,86 @@ private struct LegacyFeedTable: View {
 
 // MARK: - Cells
 
-/// What happened to the file — static identity, so a quiet secondary glyph.
-private struct OperationGlyph: View {
-    let operation: ActivityFeed.Row.Operation
-
-    var body: some View {
-        Image(systemName: operation == .deleted ? "trash" : "pencil")
-            .foregroundStyle(.secondary)
-            .accessibilityLabel(operation == .deleted ? "Deleted" : "Modified")
-            .help(operation == .deleted ? "Deleted" : "Modified")
-            .frame(maxWidth: .infinity)
-    }
-}
-
+/// The item's path — or, for a bulk entry, its count summary ("312 changes"),
+/// set quieter to read as a summary line rather than a file.
+///
+/// A DELETED item's name is struck through — the universal idiom, and it
+/// composes with every verb ("Delivered ~~name~~" = the tombstone reached
+/// the device — the fact the old trash-glyph column never quite conveyed).
+/// Strikethrough is visual-only, so the fact also rides the tooltip and the
+/// accessibility label. This replaced the dedicated operation column
+/// (2026-08-18): a glyph that read "pencil" on nearly every row carried no
+/// information, and the one state it existed for is better marked on the
+/// name itself. The operation FACT stays on the entry — the Change Type
+/// filter and this styling both read it.
 private struct NameCell: View {
-    let path: String
+    let entry: ActivityFeed.Entry
 
     var body: some View {
-        Text(path)
+        let deleted = entry.operation == .deleted && entry.bulkCount == nil
+        Text(entry.displayName)
+            .strikethrough(deleted)
+            .foregroundStyle(entry.bulkCount == nil
+                             ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
             .truncationMode(.middle)
-            .help(path)
+            .help(deleted ? "\(entry.displayName) — deleted" : entry.displayName)
+            .accessibilityLabel(deleted ? "\(entry.displayName), deleted"
+                                        : entry.displayName)
     }
 }
 
-/// Whose change it is — the device that MADE the change (modifiedBy), not
-/// the transfer source (Syncthing pulls blocks from every replica that has
-/// them; sources are plural, unexposed, and plumbing — authorship is the
-/// human fact). Local edits say "This Mac"; inbound rows name the
+/// The entry's other party — the device that MADE the change (modifiedBy),
+/// not the transfer source (Syncthing pulls blocks from every replica that
+/// has them; sources are plural, unexposed, and plumbing — authorship is the
+/// human fact). Local detections say "This Mac"; inbound entries name the
 /// originating device (— until the commit event identifies it).
-private struct OriginCell: View {
-    let row: ActivityFeed.Row
+private struct PartyCell: View {
+    let entry: ActivityFeed.Entry
 
     var body: some View {
-        Text(row.originDisplay)
+        Text(entry.partyDisplay)
             .foregroundStyle(.secondary)
     }
 }
 
-/// The journey state — one glyph, sitting beside the operation glyph so the
-/// pair reads as a compound fact. Every state has a distinct silhouette;
-/// color reinforces (green settled/active, red failed, gray waiting/void),
-/// never alone. The word lives in the tooltip and accessibility label; the
-/// failed state's tooltip carries the error text.
-private struct StatusGlyph: View {
-    let state: ActivityFeed.Row.JourneyState
+/// The entry's verb — glyph + word, reading as one fact. The visual rule
+/// from the log redesign: arrows mean IN FLIGHT, checkmarks mean settled —
+/// an arrow can never again be misread as activity on a finished item.
+/// Color reinforces, never alone; the failed entry's tooltip carries the
+/// error text. (Wording and glyph choices are provisional pending the
+/// visual-language pass.)
+private struct EventCell: View {
+    let kind: ActivityFeed.Entry.Kind
 
     var body: some View {
-        let display = Self.display(for: state)
-        Image(systemName: display.symbol)
-            .foregroundStyle(display.color)
-            .accessibilityLabel(display.label)
-            .help(display.detail)
-            .frame(maxWidth: .infinity)
+        let display = Self.display(for: kind)
+        HStack(spacing: 5) {
+            Image(systemName: display.symbol)
+                .foregroundStyle(display.color)
+            Text(display.verb)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(display.verb)
+        .help(display.detail)
     }
 
-    private static func display(for state: ActivityFeed.Row.JourneyState)
-        -> (symbol: String, color: Color, label: String, detail: String) {
-        switch state {
-        case .pending:
-            ("clock", .secondary, "Pending",
-             "Waiting to sync to another device")
-        case .uploading:
-            ("arrow.triangle.2.circlepath", .green, "Syncing out",
-             "Another device is downloading this change")
-        case .synced:
-            ("arrow.up", .green, "Synced",
-             "Delivered to at least one other device")
-        case .superseded:
-            ("clock.badge.xmark", .secondary, "Superseded",
-             "Replaced by a newer change before it synced")
-        case .syncing:
-            ("arrow.triangle.2.circlepath", .green, "Syncing",
-             "Being applied on this Mac")
+    private static func display(for kind: ActivityFeed.Entry.Kind)
+        -> (symbol: String, color: Color, verb: String, detail: String) {
+        switch kind {
+        case .detected:
+            ("magnifyingglass", .secondary, "Detected",
+             "A change on this Mac was detected")
+        case .sending:
+            ("arrow.up.circle", .blue, "Sending",
+             "The device is downloading this change")
+        case .delivered:
+            ("checkmark.circle", .green, "Delivered",
+             "The device has this change")
+        case .downloading:
+            ("arrow.down.circle", .blue, "Downloading",
+             "Receiving this change from another device")
         case .applied:
-            ("arrow.down", .green, "Applied",
+            ("checkmark.circle", .green, "Applied",
              "Applied on this Mac")
         case let .failed(message):
             ("exclamationmark.triangle", .red, "Failed",

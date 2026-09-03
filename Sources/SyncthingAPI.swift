@@ -101,12 +101,23 @@ struct SyncthingAPI: Equatable {
     /// other fields in the response are ignored. `paused` matters beyond
     /// display: a paused folder is not running, and the per-folder endpoints
     /// (`/rest/folder/errors`) return 404 "folder is paused" for it —
-    /// verified live 2026-08-03.
+    /// verified live 2026-08-03. `type` and `devices` feed the activity
+    /// feed's delivery expectation: a receive-only folder never sends local
+    /// changes, and the share list bounds who could receive them.
     struct Folder: Decodable, Equatable {
+        struct SharedDevice: Decodable, Equatable {
+            let deviceID: String
+        }
+
         let id: String
         let label: String
         let path: String
         let paused: Bool
+        /// "sendreceive" / "sendonly" / "receiveonly" (nil on responses that
+        /// omit it — treated as the sendreceive default).
+        let type: String?
+        /// The devices this folder is shared with, INCLUDING this device.
+        let devices: [SharedDevice]?
     }
 
     /// `GET /rest/config/folders` → the configured folders (id, label, filesystem path).
@@ -181,6 +192,37 @@ struct SyncthingAPI: Equatable {
         let files = decoded.files ?? []
         return RemoteNeed(needed: Set(files.map(\.name)),
                           complete: files.count < (decoded.perpage ?? Self.remoteNeedPageSize))
+    }
+
+    /// One file's index entry, as the activity feed needs it: authorship and
+    /// current availability.
+    struct FileStatus: Equatable {
+        /// The short device id from the global entry's version, nil if absent.
+        let modifiedBy: String?
+        /// Full ids of the devices the file is currently available from —
+        /// for an outbound file, the remotes that already HAVE it. Computed
+        /// from our own index, so a per-file delivery check against it is
+        /// sound regardless of how large the folder's need list is.
+        let availableOn: [String]
+    }
+
+    /// `GET /rest/db/file` → authorship + availability for one path. Used by
+    /// the activity feed to resolve rows whose triggering signal names only
+    /// the path (transfer mentions, truth-seeded queue rows), and to settle
+    /// in-flight rows whose transfer ended without a witnessed confirmation.
+    func fileStatus(folder: String, file: String) async throws -> FileStatus {
+        struct Info: Decodable { let modifiedBy: String? }
+        struct Availability: Decodable { let id: String }
+        struct Response: Decodable {
+            let global: Info?
+            let availability: [Availability]?
+        }
+        let query = "folder=\(try Self.encodeQueryValue(folder))"
+            + "&file=\(try Self.encodeQueryValue(file))"
+        let data = try await send("/rest/db/file?\(query)", method: "GET")
+        let decoded = try JSONDecoder().decode(Response.self, from: data)
+        return FileStatus(modifiedBy: decoded.global?.modifiedBy,
+                          availableOn: (decoded.availability ?? []).map(\.id))
     }
 
     private static func encodeQueryValue(_ value: String) throws -> String {
@@ -309,6 +351,15 @@ struct SyncthingAPI: Equatable {
         let device: String?
         let completion: Double?
         let needItems: Int?
+        let needDeletes: Int?
+        /// LocalIndexUpdated: how many index items the batched event covers —
+        /// the activity feed's burst backstop (batched events survive the
+        /// ring overflow that eats per-file change events).
+        let items: Int?
+        /// LocalIndexUpdated: the batch's file names. Complete when its
+        /// count equals `items` — then the backstop can recover missed
+        /// changes BY NAME instead of aggregating.
+        let filenames: [String]?
         /// RemoteDownloadProgress: the paths the remote device is actively
         /// downloading (the keys of its `state` block-count map).
         let downloadingPaths: [String]?
@@ -316,7 +367,11 @@ struct SyncthingAPI: Equatable {
         private enum CodingKeys: String, CodingKey { case id, type, time, data }
         private enum DataKeys: String, CodingKey {
             case folder, label, path, item, action, type, modifiedBy, error
-            case device, completion, needItems, state
+            case device, completion, needItems, needDeletes, items, filenames, state
+            // DeviceConnected/DeviceDisconnected carry the device id as `id`
+            // while every other device-bearing event says `device` (upstream
+            // inconsistency, docs-verified 2026-08-02) — decode both.
+            case deviceID = "id"
         }
 
         init(from decoder: Decoder) throws {
@@ -333,15 +388,20 @@ struct SyncthingAPI: Equatable {
                 itemKind = try? data.decodeIfPresent(String.self, forKey: .type)
                 modifiedBy = try? data.decodeIfPresent(String.self, forKey: .modifiedBy)
                 error = try? data.decodeIfPresent(String.self, forKey: .error)
-                device = try? data.decodeIfPresent(String.self, forKey: .device)
+                device = (try? data.decodeIfPresent(String.self, forKey: .device))
+                    ?? (try? data.decodeIfPresent(String.self, forKey: .deviceID))
                 completion = try? data.decodeIfPresent(Double.self, forKey: .completion)
                 needItems = try? data.decodeIfPresent(Int.self, forKey: .needItems)
+                needDeletes = try? data.decodeIfPresent(Int.self, forKey: .needDeletes)
+                items = try? data.decodeIfPresent(Int.self, forKey: .items)
+                filenames = try? data.decodeIfPresent([String].self, forKey: .filenames)
                 downloadingPaths = (try? data.decodeIfPresent([String: Int].self, forKey: .state))
                     .map { Array($0.keys) }
             } else {
                 folder = nil; label = nil; path = nil; action = nil
                 itemKind = nil; modifiedBy = nil; error = nil
                 device = nil; completion = nil; needItems = nil
+                needDeletes = nil; items = nil; filenames = nil
                 downloadingPaths = nil
             }
         }
@@ -369,13 +429,17 @@ struct SyncthingAPI: Equatable {
     /// The activity stream — long-poll semantics identical to `events`, but a
     /// distinct filter (thus a distinct server-side subscription) decoding the
     /// richer change-lifecycle payloads. The disk-change events must be named
-    /// explicitly: they are excluded from the default event mask.
-    /// FolderCompletion drives delivery confirmation for local changes;
-    /// RemoteDownloadProgress marks pending rows a remote is actively
-    /// fetching (see `ActivityFeed`).
+    /// explicitly: they are excluded from the default event mask. Every type
+    /// has a consumer in `ActivityFeed`: the change/item events drive log
+    /// entries, FolderCompletion drives delivery confirmation + Devices-panel
+    /// counts, RemoteDownloadProgress is the per-item outbound signal,
+    /// LocalIndexUpdated is the burst backstop, ConfigSaved cues an identity
+    /// refresh, and the connectivity pair maintains the connected set.
     static let activityEventTypes = ["LocalChangeDetected", "RemoteChangeDetected",
                                      "ItemStarted", "ItemFinished",
-                                     "FolderCompletion", "RemoteDownloadProgress"]
+                                     "FolderCompletion", "RemoteDownloadProgress",
+                                     "LocalIndexUpdated", "ConfigSaved",
+                                     "DeviceConnected", "DeviceDisconnected"]
 
     func activityEvents(since: Int, timeout: Int, limit: Int? = nil) async throws -> [ActivityEvent] {
         var query = "since=\(since)&timeout=\(timeout)&events=\(Self.activityEventTypes.joined(separator: ","))"
@@ -385,15 +449,24 @@ struct SyncthingAPI: Equatable {
         return try JSONDecoder().decode([ActivityEvent].self, from: data)
     }
 
-    /// `GET /rest/events/disk` — the daemon's always-on recent-changes buffer
-    /// (LocalChangeDetected + RemoteChangeDetected, ring of 1000, populated
-    /// since daemon start). Unlike an ad-hoc filtered subscription this HAS
-    /// history, so it seeds the Activity window on open. One-shot: returns the
-    /// newest `limit` immediately (timeout=1 so an empty buffer can't park).
-    func diskEvents(limit: Int) async throws -> [ActivityEvent] {
-        let data = try await send("/rest/events/disk?since=0&limit=\(limit)&timeout=1",
-                                  method: "GET", timeoutInterval: 15)
-        return try JSONDecoder().decode([ActivityEvent].self, from: data)
+    /// One device's sync position for one folder, computed from OUR index —
+    /// the same numbers FolderCompletion events carry. Works for the local
+    /// device too (pass `myID`): then it's this device's completion against
+    /// the global state (the inbound backlog).
+    struct Completion: Decodable, Equatable {
+        let completion: Double
+        let needItems: Int
+        let needDeletes: Int
+    }
+
+    /// `GET /rest/db/completion?folder=&device=` → that device's position for
+    /// the folder. Fails (404) for a device that doesn't share the folder —
+    /// callers use that to discover sharing.
+    func completion(folder: String, device: String) async throws -> Completion {
+        let query = "folder=\(try Self.encodeQueryValue(folder))"
+            + "&device=\(try Self.encodeQueryValue(device))"
+        let data = try await send("/rest/db/completion?\(query)", method: "GET")
+        return try JSONDecoder().decode(Completion.self, from: data)
     }
 
     // MARK: - Request plumbing

@@ -3,49 +3,103 @@ import Testing
 @testable import SyncthingMenu
 
 /// Pure-logic tests for the Activity window's display layer: the filter
-/// predicate and its bar grammar, the sort-order tiebreaker, the row sort
+/// predicate and its bar grammar, the sort-order tiebreaker, the entry sort
 /// keys (pinning the decided attention order), and the shared status model's
 /// text priority chain.
 struct ActivityDisplayTests {
 
-    private func makeRow(op: ActivityFeed.Row.Operation = .modified,
-                         state: ActivityFeed.Row.JourneyState = .pending,
-                         isLocal: Bool = true,
-                         path: String = "a.txt",
-                         origin: String? = nil) -> ActivityFeed.Row {
-        ActivityFeed.Row(time: Date(timeIntervalSince1970: 0), folderID: "f",
-                         folderLabel: "F", path: path, isLocalOrigin: isLocal,
-                         operation: op, state: state, origin: origin,
-                         episodeOpen: false, uploadRefreshedAt: nil)
+    private func makeEntry(kind: ActivityFeed.Entry.Kind = .detected,
+                           op: ActivityFeed.Entry.Operation = .modified,
+                           path: String = "a.txt",
+                           time: Date = Date(timeIntervalSince1970: 0),
+                           bulkCount: Int? = nil,
+                           party: String? = nil) -> ActivityFeed.Entry {
+        ActivityFeed.Entry(time: time, kind: kind, folderID: "f", folderLabel: "F",
+                           path: path, operation: op, bulkCount: bulkCount, party: party)
     }
 
     // MARK: Filter predicate
 
-    /// A row shows iff its direction box AND its operation box are checked —
-    /// the full truth table across both groups.
+    /// An entry shows iff its direction box AND its operation box are checked
+    /// — the full truth table across both groups. Direction is a property of
+    /// the verb: detected is outbound, the item kinds are inbound.
     @Test func filterTruthTable() {
         let model = ActivityDisplayModel()
-        let localModify = makeRow(op: .modified, isLocal: true)
-        let localDelete = makeRow(op: .deleted, isLocal: true)
-        let remoteModify = makeRow(op: .modified, isLocal: false)
-        let remoteDelete = makeRow(op: .deleted, isLocal: false)
+        let outboundModify = makeEntry(kind: .detected, op: .modified)
+        let outboundDelete = makeEntry(kind: .detected, op: .deleted)
+        let inboundModify = makeEntry(kind: .applied, op: .modified)
+        let inboundDelete = makeEntry(kind: .applied, op: .deleted)
 
-        #expect(model.allows(localModify) && model.allows(localDelete)
-                && model.allows(remoteModify) && model.allows(remoteDelete))
+        #expect(model.allows(outboundModify) && model.allows(outboundDelete)
+                && model.allows(inboundModify) && model.allows(inboundDelete))
         #expect(!model.isActive)
 
-        model.showLocal = false
-        #expect(!model.allows(localModify) && !model.allows(localDelete))
-        #expect(model.allows(remoteModify) && model.allows(remoteDelete))
+        model.showOutbound = false
+        #expect(!model.allows(outboundModify) && !model.allows(outboundDelete))
+        #expect(model.allows(inboundModify) && model.allows(inboundDelete))
         #expect(model.isActive)
 
-        model.showLocal = true
+        model.showOutbound = true
         model.showDeleted = false
-        #expect(model.allows(localModify) && model.allows(remoteModify))
-        #expect(!model.allows(localDelete) && !model.allows(remoteDelete))
+        #expect(model.allows(outboundModify) && model.allows(inboundModify))
+        #expect(!model.allows(outboundDelete) && !model.allows(inboundDelete))
 
         model.showModified = false
-        #expect(!model.allows(localModify) && !model.allows(remoteDelete))
+        #expect(!model.allows(outboundModify) && !model.allows(inboundDelete))
+    }
+
+    /// Name search: case-insensitive substring over the path, ANDed with the
+    /// checkbox groups. Bulk entries carry no path, so a non-empty search
+    /// never matches them (the aggregate tier's documented boundary).
+    @Test func searchMatchesPathsCaseInsensitively() {
+        let model = ActivityDisplayModel()
+        let photo = makeEntry(path: "Photos/IMG_2041.jpeg")
+        let note = makeEntry(path: "notes.md")
+        let bulk = makeEntry(path: "", bulkCount: 312)
+
+        #expect(model.allows(bulk))          // empty search hides nothing
+        model.searchText = "img_20"
+        #expect(model.allows(photo))
+        #expect(!model.allows(note))
+        #expect(!model.allows(bulk))
+        #expect(model.isActive)
+
+        // Search ANDs with the groups: a matching entry still needs its
+        // direction box checked.
+        model.showOutbound = false
+        #expect(!model.allows(photo))
+
+        model.clear()
+        #expect(model.searchText.isEmpty)
+        #expect(!model.isActive)
+    }
+
+    /// The bar grammar's search clause.
+    @Test func summaryIncludesSearchClause() {
+        let model = ActivityDisplayModel()
+        model.searchText = "img"
+        #expect(model.summary == "Showing changes matching “img”")
+        model.showDeleted = false
+        #expect(model.summary == "Showing adds & modifies matching “img”")
+    }
+
+    /// Bulk entries summarize their count in the Name column; per-item
+    /// entries show their path.
+    @Test func displayNameSummarizesBulkEntries() {
+        #expect(makeEntry(bulkCount: 1).displayName == "1 change")
+        #expect(makeEntry(bulkCount: 312).displayName == "312 changes")
+        #expect(makeEntry(path: "a.txt").displayName == "a.txt")
+    }
+
+    /// Direction is a property of the verb: detections and the
+    /// transfer/delivery kinds are outbound, the item kinds inbound.
+    @Test func directionFollowsKind() {
+        #expect(ActivityFeed.Entry.Kind.detected.isOutbound)
+        #expect(ActivityFeed.Entry.Kind.sending.isOutbound)
+        #expect(ActivityFeed.Entry.Kind.delivered.isOutbound)
+        #expect(!ActivityFeed.Entry.Kind.downloading.isOutbound)
+        #expect(!ActivityFeed.Entry.Kind.applied.isOutbound)
+        #expect(!ActivityFeed.Entry.Kind.failed("x").isOutbound)
     }
 
     /// The bar grammar, verified against the agreed example set.
@@ -57,19 +111,19 @@ struct ActivityDisplayTests {
         #expect(model.summary == "Showing no changes")
 
         model.clear()
-        model.showLocal = false
-        model.showRemote = false
+        model.showOutbound = false
+        model.showInbound = false
         #expect(model.summary == "Showing no changes")
 
         model.clear()
         model.showDeleted = false
         #expect(model.summary == "Showing adds & modifies")
 
-        model.showRemote = false
+        model.showInbound = false
         #expect(model.summary == "Showing adds & modifies from this Mac")
 
-        model.showRemote = true
-        model.showLocal = false
+        model.showInbound = true
+        model.showOutbound = false
         #expect(model.summary == "Showing adds & modifies from other devices")
 
         model.clear()
@@ -77,11 +131,11 @@ struct ActivityDisplayTests {
         #expect(model.summary == "Showing deletes")
 
         model.clear()
-        model.showLocal = false
+        model.showOutbound = false
         #expect(model.summary == "Showing changes from other devices")
 
-        model.showLocal = true
-        model.showRemote = false
+        model.showOutbound = true
+        model.showInbound = false
         #expect(model.summary == "Showing changes from this Mac")
     }
 
@@ -89,11 +143,11 @@ struct ActivityDisplayTests {
     @Test func clearVersusResetDisplay() {
         let model = ActivityDisplayModel()
         model.showDeleted = false
-        model.sortOrder = [KeyPathComparator(\ActivityFeed.Row.folderLabel)]
+        model.sortOrder = [KeyPathComparator(\ActivityFeed.Entry.folderLabel)]
 
         model.clear()
         #expect(!model.isActive)
-        #expect(model.sortOrder.first?.keyPath == \ActivityFeed.Row.folderLabel)
+        #expect(model.sortOrder.first?.keyPath == \ActivityFeed.Entry.folderLabel)
 
         model.resetDisplay()
         #expect(model.sortOrder == ActivityDisplayModel.defaultSortOrder)
@@ -105,42 +159,39 @@ struct ActivityDisplayTests {
     @Test func nameTiebreakerAppendedExceptWhenPrimary() {
         let model = ActivityDisplayModel()
         #expect(model.effectiveSortOrder.count == 2)
-        #expect(model.effectiveSortOrder.last?.keyPath == \ActivityFeed.Row.path)
+        #expect(model.effectiveSortOrder.last?.keyPath == \ActivityFeed.Entry.path)
 
-        model.sortOrder = [KeyPathComparator(\ActivityFeed.Row.path)]
+        model.sortOrder = [KeyPathComparator(\ActivityFeed.Entry.path)]
         #expect(model.effectiveSortOrder.count == 1)
     }
 
     /// Default sort shows newest first.
     @Test func defaultSortIsNewestFirst() {
-        let old = makeRow(path: "old.txt")
-        var newer = makeRow(path: "new.txt")
-        newer.time = Date(timeIntervalSince1970: 100)
+        let old = makeEntry(path: "old.txt")
+        let newer = makeEntry(path: "new.txt", time: Date(timeIntervalSince1970: 100))
         let sorted = [old, newer].sorted(using: ActivityDisplayModel().effectiveSortOrder)
         #expect(sorted.first?.path == "new.txt")
     }
 
-    // MARK: Row sort keys
+    // MARK: Entry sort keys
 
-    /// Pins the decided attention order: ascending Status puts problems first,
-    /// settled outcomes last.
-    @Test func stateSortKeyFollowsAttentionOrder() {
-        let states: [ActivityFeed.Row.JourneyState] =
-            [.failed("boom"), .syncing, .uploading, .pending, .superseded, .applied, .synced]
-        let keys = states.map { makeRow(state: $0).stateSortKey }
+    /// Pins the decided attention order: ascending Event puts problems first,
+    /// then in-flight, then observations, then settled outcomes.
+    @Test func kindSortKeyFollowsAttentionOrder() {
+        let kinds: [ActivityFeed.Entry.Kind] =
+            [.failed("boom"), .downloading, .sending, .detected,
+             .delivered, .applied]
+        let keys = kinds.map { makeEntry(kind: $0).kindSortKey }
         #expect(keys == keys.sorted())
         #expect(Set(keys).count == keys.count)
     }
 
-    @Test func operationSortKeyOrdersModifiesFirst() {
-        #expect(makeRow(op: .modified).operationSortKey < makeRow(op: .deleted).operationSortKey)
-    }
-
-    /// The Changed By display string: authorship, with honest fallbacks.
-    @Test func originDisplayVariants() {
-        #expect(makeRow(isLocal: true).originDisplay == "This Mac")
-        #expect(makeRow(isLocal: false, origin: "Laptop").originDisplay == "Laptop")
-        #expect(makeRow(isLocal: false, origin: nil).originDisplay == "—")
+    /// The Device column's display string: the entry's party, with the
+    /// honest "—" while an author is still unidentified.
+    @Test func partyDisplayVariants() {
+        #expect(makeEntry(party: "This Mac").partyDisplay == "This Mac")
+        #expect(makeEntry(party: "Laptop").partyDisplay == "Laptop")
+        #expect(makeEntry(party: nil).partyDisplay == "—")
     }
 
     // MARK: SyncthingStatusModel

@@ -4,14 +4,18 @@ import SwiftUI
 
 /// Hosts the SwiftUI `ActivityView` in a single reusable AppKit window.
 ///
-/// Chrome design (see also the state table in `ActivityFeed`): a unified
+/// Chrome design (see also the model doc in `ActivityFeed`): a unified
 /// title bar carries identity + live state — title "Activity", subtitle the
-/// global Syncthing status in the menu's grammar — and the window's verbs as
-/// trailing toolbar buttons (Pause⇄Resume, Rescan All, mirroring the menu;
-/// Filter is a placeholder for the scoping feature). The content below is
-/// pure data. Daemon verbs DISABLE when the daemon isn't running — unlike
-/// the menu, which hides its verbs: a toolbar is persistent spatial chrome,
-/// and controls that vanish are more disorienting than controls that rest.
+/// global Syncthing status in the menu's grammar — and trailing toolbar
+/// controls that all act on the WINDOW itself: the name-search field and the
+/// Filter popover (both writing into the shared `ActivityDisplayModel`) and
+/// the Keep-on-Top pin. The content below is pure data.
+///
+/// Deliberately NO daemon verbs here (Pause/Rescan removed 2026-08-18,
+/// superseding the 0.3.0 mirror-the-menu design): the window is a pure
+/// observation instrument, and its chrome follows one grammar — everything
+/// in the toolbar scopes or positions the window. Commanding Syncthing is
+/// the menu's job, one click away.
 ///
 /// Same agent-app pattern as Settings/About (activate to front, single
 /// instance retained across close), but resizable and frame-persistent, so
@@ -21,26 +25,24 @@ import SwiftUI
 /// Visibility is the activity feature's on/off switch: `onVisibilityChange`
 /// tells the owner when the window opens/closes so the event stream runs only
 /// while someone is looking (closed window = zero daemon traffic).
-final class ActivityWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate {
+final class ActivityWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
+                                      NSSearchFieldDelegate {
     private var window: NSWindow?
     private let feed: ActivityFeed
+    /// Feeds the header accessory's live status line (the SwiftUI view
+    /// observes it directly — the controller itself no longer reacts to
+    /// status changes now that no toolbar item depends on daemon state).
     private let status: SyncthingStatusModel
     private let display = ActivityDisplayModel()
-    private var statusSink: AnyCancellable?
     private var filterSink: AnyCancellable?
 
     /// Fired with `true` on show, `false` when the window closes.
     var onVisibilityChange: ((Bool) -> Void)?
-    /// Daemon verbs, wired by the owner to the same handlers as the menu.
-    var onRescanAll: (() -> Void)?
-    /// `true` = pause all devices, `false` = resume all.
-    var onPauseToggle: ((_ pause: Bool) -> Void)?
 
-    private var pauseItem: NSToolbarItem?
-    private var rescanItem: NSToolbarItem?
     private var filterItem: NSToolbarItem?
     private var filterButton: NSButton?
     private var pinItem: NSToolbarItem?
+    private var searchItem: NSSearchToolbarItem?
 
     private lazy var filterPopover: NSPopover = {
         let popover = NSPopover()
@@ -78,7 +80,8 @@ final class ActivityWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
         if reset {
             NSWindow.removeFrame(usingName: Self.frameName)
             ActivityColumnStore.clear()
-            display.resetDisplay()
+            display.resetDisplay()   // filters, search text, and sort
+            searchItem?.searchField.stringValue = ""
             keepOnTop = false   // applyPin() below applies level + icon
         }
         if window == nil {
@@ -117,9 +120,6 @@ final class ActivityWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
             newWindow.setFrameAutosaveName(Self.frameName)
             newWindow.delegate = self
             window = newWindow
-            statusSink = status.$phase
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] _ in self?.applyStatus() }
             // receive-on-main defers one tick so the model's new values are
             // settled when the icon reads isActive (objectWillChange fires
             // on willSet).
@@ -132,7 +132,6 @@ final class ActivityWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
             window.center()
             NotificationCenter.default.post(name: .activityLayoutReset, object: nil)
         }
-        applyStatus()
         applyPin()
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
@@ -140,39 +139,38 @@ final class ActivityWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
     }
 
     func windowWillClose(_ notification: Notification) {
+        // The search text is transient view scoping, like the feed's rows:
+        // every open starts fresh (drop-on-close philosophy).
+        display.searchText = ""
+        searchItem?.searchField.stringValue = ""
         onVisibilityChange?(false)
     }
 
-    /// Reflect the global status in the toolbar: verbs enabled only while the
-    /// daemon runs; the pause item is a single state-reflecting toggle, like
-    /// the menu's. (The status TEXT lives in the header item's SwiftUI view,
-    /// which observes the model itself.)
-    private func applyStatus() {
-        let running = status.isRunning
-        pauseItem?.isEnabled = running
-        rescanItem?.isEnabled = running
-        let paused = status.isPaused
-        pauseItem?.image = NSImage(systemSymbolName: paused ? "play" : "pause",
-                                   accessibilityDescription: nil)
-        pauseItem?.label = paused ? "Resume All" : "Pause All"
-        pauseItem?.toolTip = paused ? "Resume all devices" : "Pause all devices"
+    // MARK: - Search
+
+    /// One sync point for both search signals (typing via the field
+    /// delegate, clear/Return via the action).
+    @objc private func searchChanged() {
+        display.searchText = searchItem?.searchField.stringValue ?? ""
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        searchChanged()
     }
 
     // MARK: - Toolbar
 
     private enum ItemID {
-        static let pause = NSToolbarItem.Identifier("PauseAll")
-        static let rescan = NSToolbarItem.Identifier("RescanAll")
+        static let search = NSToolbarItem.Identifier("Search")
         static let filter = NSToolbarItem.Identifier("Filter")
         static let pin = NSToolbarItem.Identifier("KeepOnTop")
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        // Daemon verbs together; Filter and the pin apart at the far edge —
-        // acting on Syncthing, scoping the view, and window behavior are
-        // different kinds of control. (The identity cluster is a titlebar
-        // accessory, not an item.)
-        [.flexibleSpace, ItemID.pause, ItemID.rescan, .space, ItemID.filter, ItemID.pin]
+        // The view-scoping pair (search, then the Filter popover), then the
+        // pin — every control acts on the window itself. (The identity
+        // cluster is a titlebar accessory, not an item.)
+        [.flexibleSpace, ItemID.search, ItemID.filter, ItemID.pin]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -183,16 +181,6 @@ final class ActivityWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
                  itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         switch itemIdentifier {
-        case ItemID.pause:
-            let item = makeItem(itemIdentifier, symbol: "pause", label: "Pause All",
-                                toolTip: "Pause all devices", action: #selector(togglePause))
-            pauseItem = item
-            return item
-        case ItemID.rescan:
-            let item = makeItem(itemIdentifier, symbol: "arrow.clockwise", label: "Rescan All",
-                                toolTip: "Rescan all folders", action: #selector(rescanAll))
-            rescanItem = item
-            return item
         case ItemID.filter:
             // A custom NSButton view (not a bordered image item): the
             // popover needs a real view to anchor to, and the icon swaps to
@@ -208,6 +196,20 @@ final class ActivityWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
             filterButton = button
             filterItem = item
             applyFilterIcon()
+            return item
+        case ItemID.search:
+            // Name search: writes straight into the display model (the view
+            // filters live per keystroke). Both signals are wired — the
+            // delegate's text-change for typing, the action for the clear
+            // button and Return — through one sync point.
+            let item = NSSearchToolbarItem(itemIdentifier: itemIdentifier)
+            item.searchField.placeholderString = "Search names"
+            item.searchField.delegate = self
+            item.searchField.target = self
+            item.searchField.action = #selector(searchChanged)
+            item.label = "Search"
+            item.toolTip = "Show only entries whose name contains the text"
+            searchItem = item
             return item
         case ItemID.pin:
             let item = makeItem(itemIdentifier, symbol: "pin", label: "Keep on Top",
@@ -229,16 +231,8 @@ final class ActivityWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
         item.toolTip = toolTip
         item.target = self
         item.action = action
-        item.autovalidates = false   // enablement is driven by applyStatus()
+        item.autovalidates = false   // nothing here depends on responder state
         return item
-    }
-
-    @objc private func togglePause() {
-        onPauseToggle?(!status.isPaused)
-    }
-
-    @objc private func rescanAll() {
-        onRescanAll?()
     }
 
     @objc private func toggleFilterPopover(_ sender: NSButton) {
