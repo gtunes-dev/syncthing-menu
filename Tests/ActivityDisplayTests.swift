@@ -398,7 +398,7 @@ struct ActivityDisplayTests {
     /// them — when the override clears, display restarts from current truth.
     @Test func overridesBypassSmoothingAndResetHold() {
         let model = SyncthingStatusModel()
-        var time = Date(timeIntervalSinceReferenceDate: 0)
+        let time = Date(timeIntervalSinceReferenceDate: 0)
         model.now = { time }
 
         model.update(running(.syncing))
