@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-09-03
+
 ### Changed
 - The Activity window is redesigned as a live activity log. It opens empty and records sync events as they happen — a change detected, a file sending to or arriving from another device, a delivery confirmed, a failure — one row per event, newest first, each naming the file and the device involved. Nothing is replayed from before the window opened, rows never change once written, and closing the window clears it.
 - Very large batches of changes (an app churning thousands of files at once) are summarized as single "N changes" rows instead of flooding the log; files actually transferring still appear individually.
