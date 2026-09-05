@@ -107,7 +107,7 @@ jobs:
         # filename, so it must differ from the zip it contains: a same-named
         # zip-inside-a-zip trips Archive Utility (extraction collisions that
         # read as a corrupt file — seen on the first soak build).
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6   # v6 = Node 24 (v4/v5 run on Node 20, removed Sept 2026)
         with:
           name: soak-${{ steps.ver.outputs.version }}
           path: ${{ steps.build.outputs.zip }}

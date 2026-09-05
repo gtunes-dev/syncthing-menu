@@ -78,7 +78,7 @@ jobs:
 
       - name: Upload raw build/test log
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6   # v6 = Node 24 (v4/v5 run on Node 20, removed Sept 2026)
         with:
           name: xcodebuild-raw-log
           path: xcodebuild-raw.log
