@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Searching by name in the Activity window shows only file rows.
+- Batches of up to 100 changed files are listed individually in the Activity window; only larger batches are summarized as "N changes" (previously 25).
 
 ## [0.3.7] - 2026-09-03
 

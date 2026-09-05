@@ -357,13 +357,23 @@ final class ActivityFeed: ObservableObject {
     @Published private(set) var entries: [Entry] = []
 
     private static let maxEntries = 500
-    /// The human/machine scale boundary, used two ways: a poll batch
-    /// carrying MORE detections than this for one folder coalesces into one
-    /// bulk entry instead of a wall of per-item rows (principle 5), and the
-    /// index-update backstop aggregates (or, unnamed, suppresses) beyond it
-    /// instead of recovering per-item. Generous on purpose — every
-    /// coalesced item is invisible to name search.
-    static let bulkDetectionThreshold = 25
+    /// The human/machine scale boundary: a poll batch carrying MORE
+    /// detections than this for one folder coalesces into one bulk entry
+    /// instead of a wall of per-item rows (principle 5), and the
+    /// index-update backstop's NAMED recovery aggregates beyond it instead
+    /// of recovering per-item. Generous on purpose — every coalesced item is
+    /// invisible to name search — and bounded only by the row cap
+    /// (`maxEntries`): one batch at the threshold fills a fifth of it.
+    /// Raised 25 → 100 on 2026-09-04 (a 30-item batch collapsing read as
+    /// too eager in use).
+    static let bulkDetectionThreshold = 100
+    /// The backstop's UNNAMED tier: a count-only surplus at or under this is
+    /// suppressed as bookkeeping slop (index batches cover work no per-file
+    /// event we consume describes — the spurious "1 change" rows of
+    /// 2026-08-17); above it the count is real churn and logs in bulk.
+    /// Deliberately separate from `bulkDetectionThreshold` — slop is small
+    /// regardless of how eagerly named changes coalesce.
+    static let unnamedSurplusSuppression = 25
     /// How long an open loop may wait for its event-driven ending before the
     /// quiescence sweep probes for it. Comfortably past the event cadence
     /// (completion ticks ~2s, progress reports ~5s).
@@ -1034,7 +1044,7 @@ final class ActivityFeed: ObservableObject {
         } else {
             let surplus = items - witnessed.count
             guard surplus > 0 else { return }
-            guard surplus > Self.bulkDetectionThreshold else {
+            guard surplus > Self.unnamedSurplusSuppression else {
                 Log.monitor.log("activity backstop: \(surplus) unnamed surplus items suppressed")
                 return
             }

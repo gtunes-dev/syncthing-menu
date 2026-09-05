@@ -410,7 +410,8 @@ struct ActivityFeedTests {
         feed.setWindowVisible(true)
         try await waitUntilPolling(server)
 
-        let burst = (1...30).map { index in
+        let count = ActivityFeed.bulkDetectionThreshold + 5
+        let burst = (1...count).map { index in
             (type: "LocalChangeDetected",
              data: ["folder": "f1", "path": "churn/file\(index).dat",
                     "action": "modified"] as [String: Any])
@@ -418,8 +419,8 @@ struct ActivityFeedTests {
         server.pushEvents(burst)
         try await expectEventually { feed.activity.count == 1 }
         #expect(feed.activity[0].kind == .detected)
-        #expect(feed.activity[0].bulkCount == 30)
-        #expect(feed.activity[0].displayName == "30 changes")
+        #expect(feed.activity[0].bulkCount == count)
+        #expect(feed.activity[0].displayName == "\(count) changes")
         #expect(feed.activity[0].partyDisplay == "This Mac")
         #expect(feed.activity[0].folderLabel == "Folder One")
 
@@ -427,7 +428,7 @@ struct ActivityFeedTests {
                          data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
                                 "completion": 100, "needItems": 0, "needDeletes": 0])
         try await expectEventually { feed.activity.first?.kind == .delivered }
-        #expect(feed.activity.first?.bulkCount == 30)
+        #expect(feed.activity.first?.bulkCount == count)
         #expect(feed.activity.first?.partyDisplay == "Laptop")
         #expect(feed.activity.count == 2)
     }
@@ -1281,11 +1282,12 @@ struct ActivityFeedTests {
         feed.setWindowVisible(true)
         try await waitUntilPolling(server)
 
-        let names = (1...30).map { "bulk-\($0).txt" }
+        let count = ActivityFeed.bulkDetectionThreshold + 5
+        let names = (1...count).map { "bulk-\($0).txt" }
         server.pushEvent(type: "LocalIndexUpdated",
-                         data: ["folder": "f1", "items": 30, "filenames": names])
+                         data: ["folder": "f1", "items": count, "filenames": names])
         try await expectEventually { feed.activity.count == 1 }
-        #expect(feed.activity[0].bulkCount == 30)
+        #expect(feed.activity[0].bulkCount == count)
 
         server.pushEvents(names.map {
             (type: "LocalChangeDetected", data: ["folder": "f1", "path": $0, "action": "modified"])
@@ -1298,7 +1300,7 @@ struct ActivityFeedTests {
 
         // Next index cycle retires the budget: a fresh change logs.
         server.pushEvent(type: "LocalIndexUpdated",
-                         data: ["folder": "f1", "items": 30, "filenames": names])
+                         data: ["folder": "f1", "items": count, "filenames": names])
         server.pushEvent(type: "LocalChangeDetected",
                          data: ["folder": "f1", "path": "later.txt", "action": "modified"])
         try await expectEventually { feed.activity.contains { $0.path == "later.txt" } }
