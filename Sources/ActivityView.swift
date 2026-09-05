@@ -418,13 +418,42 @@ private struct NameCell: View {
         let deleted = entry.operation == .deleted && entry.bulkCount == nil
         // Summaries and markers read quieter than files.
         let quiet = entry.bulkCount != nil || entry.kind.isMarker
-        Text(entry.displayName)
-            .strikethrough(deleted)
-            .foregroundStyle(quiet ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
-            .truncationMode(.middle)
-            .help(deleted ? "\(entry.displayName) — deleted" : entry.displayName)
-            .accessibilityLabel(deleted ? "\(entry.displayName), deleted"
-                                        : entry.displayName)
+        let kind = Self.kindDisplay(entry.itemType)
+        HStack(spacing: 5) {
+            // The icon SLOT is reserved on every row so names align; the
+            // glyph appears only when the item's kind is known. Unknown
+            // (a backstop-recovered row awaiting its change event; every
+            // non-item row) draws nothing — never a guess, never an
+            // "unknown" glyph that would only describe our bookkeeping.
+            Group {
+                if let symbol = kind?.symbol {
+                    Image(systemName: symbol).foregroundStyle(.secondary)
+                } else {
+                    Color.clear
+                }
+            }
+            .frame(width: 14, height: 14)
+            Text(entry.displayName)
+                .strikethrough(deleted)
+                .foregroundStyle(quiet ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                .truncationMode(.middle)
+        }
+        .help(deleted ? "\(entry.displayName) — deleted" : entry.displayName)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel([kind?.name, entry.displayName, deleted ? "deleted" : nil]
+                                .compactMap { $0 }.joined(separator: ", "))
+    }
+
+    /// Glyph + spoken name per item kind. (Provisional glyphs, pending the
+    /// visual-language pass.)
+    private static func kindDisplay(_ type: ActivityFeed.Entry.ItemType?)
+        -> (symbol: String, name: String)? {
+        switch type {
+        case .file: ("doc", "file")
+        case .directory: ("folder", "folder")
+        case .symlink: ("link", "symbolic link")
+        case nil: nil
+        }
     }
 }
 

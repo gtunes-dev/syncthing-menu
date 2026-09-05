@@ -26,6 +26,9 @@ struct OutboundLedger {
         /// change event's own timestamp): staleness for the quiescence
         /// sweep measures how long a loop has been open.
         let openedAt: Date
+        /// The item's kind, carried from the beginning to the delivered
+        /// ending (nil = not known at tracking time).
+        var itemType: ActivityFeed.Entry.ItemType? = nil
     }
 
     /// Everything that was open for one folder, at the moment it closed.
@@ -52,12 +55,25 @@ struct OutboundLedger {
     /// Open (or refresh — a re-detected path starts a new episode) one
     /// per-item loop.
     mutating func track(folder: String, path: String,
-                        operation: ActivityFeed.Entry.Operation, at now: Date) {
+                        operation: ActivityFeed.Entry.Operation,
+                        itemType: ActivityFeed.Entry.ItemType? = nil, at now: Date) {
         if trackedItems[folder]?[path] == nil {
             if totalTracked >= Self.maxTrackedItems { evictOldestIntoBulk() }
             totalTracked += 1
         }
-        trackedItems[folder, default: [:]][path] = Item(operation: operation, openedAt: now)
+        trackedItems[folder, default: [:]][path] = Item(operation: operation, openedAt: now,
+                                                        itemType: itemType)
+    }
+
+    /// Correct an open loop's facts without restarting it (the real change
+    /// event arriving after a backstop recovery knows the operation and the
+    /// item kind the recovery could only guess). No-op when nothing is open.
+    mutating func annotate(folder: String, path: String,
+                           operation: ActivityFeed.Entry.Operation,
+                           itemType: ActivityFeed.Entry.ItemType?) {
+        guard let item = trackedItems[folder]?[path] else { return }
+        trackedItems[folder]?[path] = Item(operation: operation, openedAt: item.openedAt,
+                                           itemType: itemType ?? item.itemType)
     }
 
     /// Open (or grow) a folder's bulk loop by `count` changes.

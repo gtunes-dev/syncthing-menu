@@ -315,6 +315,29 @@ final class ActivityFeed: ObservableObject {
         /// one enrichable field: inbound entries start nil (rendered "—")
         /// until the commit event identifies the author.
         var party: String?
+        /// What kind of item this is, from the event's `type`. nil = not
+        /// known — only backstop-recovered rows (a filename list carries no
+        /// type) and, by construction, bulk rows. Enrichable: the real
+        /// change event, arriving after a recovery, fills it in. Unknown
+        /// renders as an EMPTY icon slot, never a guess or an "unknown"
+        /// glyph (lag, never lie; no non-data ink).
+        var itemType: ItemType? = nil
+
+        enum ItemType: Equatable {
+            case file
+            case directory
+            case symlink
+
+            /// The events' `type` field: "file" / "dir" / "symlink".
+            init?(apiType: String?) {
+                switch apiType {
+                case "file": self = .file
+                case "dir", "directory": self = .directory
+                case "symlink": self = .symlink
+                default: return nil
+                }
+            }
+        }
 
         /// The Name column's text: the path, except bulk entries summarize
         /// their count.
@@ -833,6 +856,7 @@ final class ActivityFeed: ObservableObject {
         let key = ItemKey(folder: folder, path: path)
         let isDelete = event.action == "delete" || event.action == "deleted"
         let operation: Entry.Operation = isDelete ? .deleted : .modified
+        let itemType = Entry.ItemType(apiType: event.itemKind)
 
         switch event.type {
         case "LocalChangeDetected":
@@ -845,17 +869,16 @@ final class ActivityFeed: ObservableObject {
             // renders as a modify all the way through delivery (regressed
             // and caught live 2026-08-18).
             if recoveredDetections.remove(key) != nil {
-                if operation == .deleted {
-                    if let index = context.entries.firstIndex(where: {
-                        $0.kind == .detected && $0.folderID == folder && $0.path == path
-                    }) {
-                        context.entries[index].operation = .deleted
-                    }
-                    if deliverableFolders.contains(folder) {
-                        ledger.track(folder: folder, path: path, operation: .deleted,
-                                     at: now())
-                    }
+                // Enrich, don't duplicate: the recovery guessed .modified
+                // and knew no item kind; this event knows both.
+                if let index = context.entries.firstIndex(where: {
+                    $0.kind == .detected && $0.folderID == folder && $0.path == path
+                }) {
+                    context.entries[index].operation = operation
+                    context.entries[index].itemType = itemType
                 }
+                ledger.annotate(folder: folder, path: path, operation: operation,
+                                itemType: itemType)
                 return
             }
             // The bulk twin: this change was already counted by a bulk
@@ -874,7 +897,8 @@ final class ActivityFeed: ObservableObject {
                 context.entries.insert(Entry(time: event.time, kind: .detected,
                                              folderID: folder, folderLabel: label,
                                              path: path, operation: operation,
-                                             bulkCount: nil, party: "This Mac"), at: 0)
+                                             bulkCount: nil, party: "This Mac",
+                                             itemType: itemType), at: 0)
                 // A loop opens only where delivery is possible in principle
                 // (principle 3): on a receive-only or unshared folder the
                 // detected entry stands alone — opening a loop there would
@@ -882,14 +906,14 @@ final class ActivityFeed: ObservableObject {
                 // completion 100.
                 if deliverableFolders.contains(folder) {
                     ledger.track(folder: folder, path: path, operation: operation,
-                                 at: now())
+                                 itemType: itemType, at: now())
                 }
             }
 
         case "ItemStarted":
             let entry = Entry(time: event.time, kind: .downloading, folderID: folder,
                               folderLabel: label, path: path, operation: operation,
-                              bulkCount: nil, party: nil)
+                              bulkCount: nil, party: nil, itemType: itemType)
             context.entries.insert(entry, at: 0)
             context.startedThisBatch[key] = entry.id
 
@@ -906,7 +930,7 @@ final class ActivityFeed: ObservableObject {
             context.entries.insert(Entry(time: event.time, kind: kind, folderID: folder,
                                          folderLabel: label, path: path,
                                          operation: operation, bulkCount: nil,
-                                         party: nil), at: 0)
+                                         party: nil, itemType: itemType), at: 0)
 
         case "RemoteChangeDetected":
             let author = event.modifiedBy.map { deviceNames[$0] ?? $0 }
@@ -923,7 +947,8 @@ final class ActivityFeed: ObservableObject {
                 context.entries.insert(Entry(time: event.time, kind: .applied,
                                              folderID: folder, folderLabel: label,
                                              path: path, operation: operation,
-                                             bulkCount: nil, party: author), at: 0)
+                                             bulkCount: nil, party: author,
+                                             itemType: itemType), at: 0)
             }
 
         default:
@@ -954,11 +979,15 @@ final class ActivityFeed: ObservableObject {
         // Sorted (then reversed, since each insert lands on top) so a burst
         // of appearances logs in deterministic path order.
         for path in reported.subtracting(previous).sorted().reversed() {
+            // Always a FILE: directories and symlinks have no blocks and never
+            // appear in a progress report — they go detected → delivered.
             context.entries.insert(Entry(time: event.time, kind: .sending,
                                          folderID: folder, folderLabel: label,
                                          path: path, operation: .modified,
-                                         bulkCount: nil, party: party), at: 0)
-            ledger.track(folder: folder, path: path, operation: .modified, at: now())
+                                         bulkCount: nil, party: party,
+                                         itemType: .file), at: 0)
+            ledger.track(folder: folder, path: path, operation: .modified,
+                         itemType: .file, at: now())
         }
         for path in previous.subtracting(reported) {
             pendingDeliveryChecks.append(DeliveryCheck(folder: folder, path: path,
@@ -1127,7 +1156,7 @@ final class ActivityFeed: ObservableObject {
             let party = displayName(forFullID: key.device)
             for (path, item) in closed.reversed() {
                 insertDelivered(folder: key.folder, path: path,
-                                operation: item.operation, party: party,
+                                operation: item.operation, itemType: item.itemType, party: party,
                                 time: time, into: &entries)
             }
             Log.monitor.log("activity remoteneed: \(closed.count) deliveries confirmed by \(key.device.prefix(7), privacy: .public)")
@@ -1177,7 +1206,7 @@ final class ActivityFeed: ObservableObject {
                     let party = displayName(forFullID: device)
                     for (path, item) in closed.reversed() {
                         insertDelivered(folder: folder, path: path,
-                                        operation: item.operation, party: party,
+                                        operation: item.operation, itemType: item.itemType, party: party,
                                         time: now(), into: &entries)
                     }
                     Log.monitor.log("activity sweep: \(closed.count) deliveries confirmed by \(device.prefix(7), privacy: .public)")
@@ -1202,12 +1231,11 @@ final class ActivityFeed: ObservableObject {
                                                              file: check.path),
                       status.availableOn.contains(check.device),
                       self.logEpoch == epoch else { return }   // loop still current
-                let operation = self.ledger.closeItem(folder: check.folder,
-                                                      path: check.path)?.operation
-                    ?? .modified
+                let item = self.ledger.closeItem(folder: check.folder, path: check.path)
                 var updated = self.entries
                 self.insertDelivered(folder: check.folder, path: check.path,
-                                     operation: operation,
+                                     operation: item?.operation ?? .modified,
+                                     itemType: item?.itemType ?? .file,   // a transfer: a file
                                      party: self.displayName(forFullID: check.device),
                                      time: check.time, into: &updated)
                 self.commit(updated)
@@ -1271,7 +1299,8 @@ final class ActivityFeed: ObservableObject {
                             party: String, time: Date, into entries: inout [Entry]) {
         for (path, item) in closure.items.reversed() {
             insertDelivered(folder: folder, path: path, operation: item.operation,
-                            party: party, time: time, into: &entries)
+                            itemType: item.itemType, party: party, time: time,
+                            into: &entries)
         }
         if closure.bulkCount > 0 {
             entries.insert(Entry(time: time, kind: .delivered, folderID: folder,
@@ -1298,7 +1327,8 @@ final class ActivityFeed: ObservableObject {
     /// delivered entry outlived an older start — it can only belong to the
     /// current episode.
     private func insertDelivered(folder: String, path: String,
-                                 operation: Entry.Operation, party: String,
+                                 operation: Entry.Operation,
+                                 itemType: Entry.ItemType? = nil, party: String,
                                  time: Date, into entries: inout [Entry]) {
         if let deliveredIndex = entries.firstIndex(where: {
             $0.kind == .delivered && $0.folderID == folder && $0.path == path
@@ -1312,7 +1342,8 @@ final class ActivityFeed: ObservableObject {
         }
         entries.insert(Entry(time: time, kind: .delivered, folderID: folder,
                              folderLabel: folderLabel(for: folder), path: path,
-                             operation: operation, bulkCount: nil, party: party), at: 0)
+                             operation: operation, bulkCount: nil, party: party,
+                             itemType: itemType), at: 0)
     }
 
     /// Bounded append-only cap: newest first, so trimming the tail IS

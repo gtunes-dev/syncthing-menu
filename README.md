@@ -74,9 +74,10 @@ Click the menu-bar icon for:
 - **Start Syncthing** — appears when the daemon is stopped or has failed.
 - **Update … to X** — a direct install action per channel, appearing only while
   that update is pending.
-- **Activity…** — a live, file-by-file view of what Syncthing is doing (below).
-- **Settings…** — update preferences for both channels, Open at login, and Full
-  Disk Access setup. Carries a caution badge when a folder needs attention.
+- **Activity…** — a live log of what Syncthing is doing (below).
+- **Settings…** — update preferences for both channels, activity recording, Open
+  at login, and Full Disk Access setup. Carries a caution badge when a folder
+  needs attention.
 - **About Syncthing Menu** — versions and release-notes links for both.
 - **Quit** — stops the daemon it manages, then exits.
 
@@ -87,11 +88,16 @@ available. Its tooltip always carries the full one-line story.
 
 ## Activity
 
-A live view of what Syncthing is doing, file by file: each change, which device
-made it, and its progress from detected through delivered, applied, or failed.
-Rows filter by change type and origin and sort by any column, and the window can
-be pinned above others. Holding ⌥ over the menu item turns it into **Activity
-(Reset Layout)…**. The window costs nothing while closed.
+A live log of what Syncthing is doing, one row per event: a change detected on
+this Mac, a file sending to or arriving from another device, a delivery
+confirmed, a failure — plus folder and device events such as pauses and devices
+going online or offline. Each row names the file or folder, its sync folder, the
+device, and the time; deletions are struck through. Search follows one file by
+name, rows filter by change type and origin and sort by any column, the window
+can be pinned above others, and Clear (⌘K) empties the log. By default the log
+records only while the window is open and costs nothing while closed; a Settings
+option keeps it recording always, and rows mark where recording started or
+paused. Holding ⌥ over the menu item turns it into **Activity (Reset Layout)…**.
 
 <p align="center">
   <img src="docs/activity.png" alt="The Syncthing Menu Activity window" width="760">
@@ -135,7 +141,8 @@ Syncthing channel only while the app manages the daemon):
   the background and install silently, no dialogs.
 
 Every version shown is a link to its release notes, and each card notes when it
-last checked.
+last checked. The app card also holds **Record activity** — only while the
+Activity window is open (the default), or always — and Open at login.
 
 <p align="center">
   <img src="docs/settings.png" alt="The Syncthing Menu Settings window" width="440">

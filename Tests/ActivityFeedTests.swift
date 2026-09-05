@@ -205,7 +205,8 @@ struct ActivityFeedTests {
         server.pushEvent(type: "LocalChangeDetected",
                          data: ["folder": "f1", "path": "a.txt", "action": "modified"])
         server.pushEvent(type: "LocalChangeDetected",
-                         data: ["folder": "f1", "path": "b.txt", "action": "deleted"])
+                         data: ["folder": "f1", "path": "b.txt", "action": "deleted",
+                                "type": "dir"])
         try await expectEventually { feed.activity.count == 2 }
 
         // The peer still needs b.txt; a.txt is absent — delivered. The
@@ -235,6 +236,9 @@ struct ActivityFeedTests {
         }
         #expect(feed.activity.first { $0.kind == .delivered && $0.path == "b.txt" }?
             .operation == .deleted)
+        // …and its kind (a deleted directory's tombstone), via the remoteneed path.
+        #expect(feed.activity.first { $0.kind == .delivered && $0.path == "b.txt" }?
+            .itemType == .directory)
         let after = needQueries()
         server.pushEvent(type: "FolderCompletion",
                          data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
@@ -1343,6 +1347,117 @@ struct ActivityFeedTests {
         try await expectEventually { daemonRows(feed).count == 3 }
         #expect(daemonRows(feed)[1].kind == .watchFailed("too many open files"))
         #expect(daemonRows(feed)[0].kind == .watchRestored)
+    }
+
+    // MARK: Item kind (file / folder / symlink)
+
+    /// The item's kind rides every row it can: from the change and item
+    /// events' `type`, through the ledger to the delivered ending; sending
+    /// rows are files by construction. A backstop-recovered row starts
+    /// unknown and the real change event fills it in — along with its
+    /// delivered ending's.
+    @Test func itemKindThreadsFromEventsToDelivered() async throws {
+        let server = try standardServer()
+        defer { server.stop() }
+        server.setFileAvailability(folder: "f1", path: "big.mov", devices: ["REMOTE7-FULL-ID"])
+        let feed = makeFeed()
+        defer { feed.disconnect() }
+        feed.connect(api: api(for: server))
+        feed.setWindowVisible(true)
+        try await waitUntilPolling(server)
+
+        server.pushEvent(type: "LocalChangeDetected",
+                         data: ["folder": "f1", "path": "Photos", "action": "modified",
+                                "type": "dir"])
+        server.pushEvent(type: "LocalChangeDetected",
+                         data: ["folder": "f1", "path": "alias", "action": "deleted",
+                                "type": "symlink"])
+        server.pushEvent(type: "ItemStarted",
+                         data: ["folder": "f1", "item": "in/a.txt", "action": "update",
+                                "type": "file"])
+        server.pushEvent(type: "RemoteDownloadProgress",
+                         data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
+                                "state": ["big.mov": 4]])
+        try await expectEventually { feed.activity.count == 4 }
+        let byPath = { (path: String) in feed.activity.first { $0.path == path } }
+        #expect(byPath("Photos")?.itemType == .directory)
+        #expect(byPath("alias")?.itemType == .symlink)
+        #expect(byPath("in/a.txt")?.itemType == .file)
+        #expect(byPath("big.mov")?.itemType == .file)
+
+        // Delivered inherits: the catch-up closes the directory and the
+        // symlink tombstone, the availability check closes the file.
+        server.pushEvent(type: "RemoteDownloadProgress",
+                         data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
+                                "state": [String: Int]()])
+        pushFullCatchUp(server)
+        try await expectEventually {
+            feed.activity.filter { $0.kind == .delivered }.count == 3
+        }
+        let delivered = feed.activity.filter { $0.kind == .delivered }
+        #expect(delivered.first { $0.path == "Photos" }?.itemType == .directory)
+        #expect(delivered.first { $0.path == "alias" }?.itemType == .symlink)
+        #expect(delivered.first { $0.path == "big.mov" }?.itemType == .file)
+    }
+
+    /// The one honest gap: a backstop-recovered detected row has no kind
+    /// (filename lists carry none) until its change event arrives — which
+    /// then enriches the row and its open loop, so the delivered ending
+    /// carries the kind too.
+    @Test func recoveredRowLearnsItsKindFromTheChangeEvent() async throws {
+        let server = try standardServer()
+        defer { server.stop() }
+        let feed = makeFeed()
+        defer { feed.disconnect() }
+        feed.connect(api: api(for: server))
+        feed.setWindowVisible(true)
+        try await waitUntilPolling(server)
+
+        server.pushEvent(type: "LocalIndexUpdated",
+                         data: ["folder": "f1", "items": 1, "filenames": ["late-dir"]])
+        try await expectEventually { feed.activity.count == 1 }
+        #expect(feed.activity[0].itemType == nil)
+
+        server.pushEvent(type: "LocalChangeDetected",
+                         data: ["folder": "f1", "path": "late-dir", "action": "modified",
+                                "type": "dir"])
+        try await expectEventually { feed.activity.first?.itemType == .directory }
+        #expect(feed.activity.count == 1)   // enriched, not duplicated
+
+        pushFullCatchUp(server)
+        try await expectEventually { feed.activity.first?.kind == .delivered }
+        #expect(feed.activity.first?.itemType == .directory)
+    }
+
+    /// Inbound rows carry the kind from every source: a same-batch
+    /// start+finish collapse keeps the finish's kind, a failed apply keeps
+    /// its kind, and a commit with no witnessed apply (standalone
+    /// RemoteChangeDetected) takes the kind from that event.
+    @Test func inboundRowsCarryKind() async throws {
+        let server = try standardServer()
+        defer { server.stop() }
+        let feed = makeFeed()
+        defer { feed.disconnect() }
+        feed.connect(api: api(for: server))
+        feed.setWindowVisible(true)
+        try await waitUntilPolling(server)
+
+        server.pushEvents([
+            (type: "ItemStarted", data: ["folder": "f1", "item": "d", "action": "update",
+                                         "type": "dir"]),
+            (type: "ItemFinished", data: ["folder": "f1", "item": "d", "action": "update",
+                                          "type": "dir"]),
+            (type: "ItemFinished", data: ["folder": "f1", "item": "bad.txt", "action": "update",
+                                          "type": "file", "error": "permission denied"]),
+            (type: "RemoteChangeDetected", data: ["folder": "f1", "path": "s", "action": "modified",
+                                                  "type": "symlink", "modifiedBy": "REMOTE7"]),
+        ])
+        try await expectEventually { feed.activity.count == 3 }
+        let byPath = { (path: String) in feed.activity.first { $0.path == path } }
+        #expect(byPath("d")?.kind == .applied && byPath("d")?.itemType == .directory)
+        #expect(byPath("bad.txt")?.kind == .failed("permission denied")
+                && byPath("bad.txt")?.itemType == .file)
+        #expect(byPath("s")?.kind == .applied && byPath("s")?.itemType == .symlink)
     }
 
     // MARK: Clear & cost bounds

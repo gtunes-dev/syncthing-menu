@@ -27,6 +27,20 @@ struct ActivityEventDecodingTests {
         #expect(event.modifiedBy == nil)
     }
 
+    /// The item-kind mapping from the events' `type`: the three kinds, the
+    /// "directory" spelling, and nil for anything else — the empty icon
+    /// slot depends on unknown staying nil rather than defaulting to file.
+    @Test func itemTypeMapsFromEventTypeStrings() {
+        typealias T = ActivityFeed.Entry.ItemType
+        #expect(T(apiType: "file") == .file)
+        #expect(T(apiType: "dir") == .directory)
+        #expect(T(apiType: "directory") == .directory)
+        #expect(T(apiType: "symlink") == .symlink)
+        #expect(T(apiType: "socket") == nil)
+        #expect(T(apiType: "") == nil)
+        #expect(T(apiType: nil) == nil)
+    }
+
     /// StateChanged carries from/to/duration; FolderWatchStateChanged reuses
     /// from/to for error text; FolderPaused names its folder as `id` +
     /// `label` (exposed raw as `dataID`, which the device fallback also
