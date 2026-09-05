@@ -11,6 +11,7 @@ struct SettingsView: View {
     @ObservedObject var appSettings: UpdateChannelSettings
     @ObservedObject var syncthingSettings: UpdateChannelSettings
     @ObservedObject var daemonSettings: DaemonModeSettings
+    @ObservedObject var activitySettings: ActivitySettings
     @ObservedObject var loginItem: LoginItemController
     @ObservedObject var folderHealth: FolderHealth
     @ObservedObject var status: SyncthingStatusModel
@@ -48,6 +49,19 @@ struct SettingsView: View {
                 UpdateControls(source: appSource, settings: appSettings)
 
                 Divider()
+
+                // Sentence-form row, like "Syncthing is …" below: the shared
+                // subject lives in the label, so the two options differ only
+                // in WHEN. The default is the option worth naming — a
+                // checkbox would leave it implicit.
+                Picker(selection: $activitySettings.recording) {
+                    Text("while the Activity window is open")
+                        .tag(ActivityRecordingPolicy.whileWindowOpen)
+                    Text("always").tag(ActivityRecordingPolicy.always)
+                } label: {
+                    Text("Record activity")
+                }
+                .fixedSize()
 
                 Toggle("Open at login", isOn: Binding(
                     get: { loginItem.isEnabled },

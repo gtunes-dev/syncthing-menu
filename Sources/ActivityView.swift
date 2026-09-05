@@ -34,6 +34,11 @@ struct ActivityView: View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
             let visible = feed.entries.filter(display.allows)
                 .sorted(using: display.effectiveSortOrder)
+            // Markers pass every filter, so under an active filter or search
+            // "nothing matches" is judged on the sync facts alone — a lone
+            // marker must not stand in for a result.
+            let hasActivity = visible.contains { !$0.kind.isMarker }
+            let hiddenActivity = feed.entries.contains { !$0.kind.isMarker } && !hasActivity
             VStack(spacing: 0) {
                 // A filtered feed must LOOK filtered — a quiet list under an
                 // invisible filter reads as "syncing broke".
@@ -42,8 +47,8 @@ struct ActivityView: View {
                     Divider()
                 }
                 Group {
-                    if visible.isEmpty {
-                        emptyFeed(filtered: display.isActive && !feed.entries.isEmpty)
+                    if visible.isEmpty || (display.isActive && !hasActivity) {
+                        emptyFeed(filtered: display.isActive && hiddenActivity)
                     } else if #available(macOS 14.0, *) {
                         CustomizableFeedTable(entries: visible, sortOrder: sortBinding,
                                               now: context.date)
@@ -158,6 +163,11 @@ final class ActivityDisplayModel: ObservableObject {
     /// tier; the empty state says so). Transient like every filter here.
     @Published var searchText = ""
 
+    /// The third group: folder & device event rows (pause/resume, peers
+    /// online/offline, folder errors, long scans, watcher state). On by
+    /// default; off lets someone watching a transfer hide the chatter.
+    @Published var showDaemonEvents = true
+
     static let defaultSortOrder = [KeyPathComparator(\ActivityFeed.Entry.time, order: .reverse)]
 
     /// The user's chosen sort (default: newest first). The Table binding
@@ -177,11 +187,22 @@ final class ActivityDisplayModel: ObservableObject {
 
     var isActive: Bool {
         !(showOutbound && showInbound && showModified && showDeleted
-            && searchText.isEmpty)
+            && showDaemonEvents && searchText.isEmpty)
     }
 
+    /// Markers always pass: they explain the gaps in whatever the filter or
+    /// search leaves visible (a searched file's thread includes the pauses
+    /// that interrupted it).
+    /// A name search shows file rows only: markers and daemon events have
+    /// no path, and a search follows one file's thread (decided 2026-09-04
+    /// — markers had passed through, and every search came back topped
+    /// with "Recording started" and "Syncthing connected"). Outside a
+    /// search, markers bypass the checkbox groups and daemon events follow
+    /// their own switch.
     func allows(_ entry: ActivityFeed.Entry) -> Bool {
-        (entry.kind.isOutbound ? showOutbound : showInbound)
+        if entry.kind.isMarker { return searchText.isEmpty }
+        if entry.kind.isDaemonEvent { return showDaemonEvents && searchText.isEmpty }
+        return (entry.kind.isOutbound ? showOutbound : showInbound)
             && (entry.operation == .deleted ? showDeleted : showModified)
             && (searchText.isEmpty
                 || entry.path.localizedCaseInsensitiveContains(searchText))
@@ -194,6 +215,7 @@ final class ActivityDisplayModel: ObservableObject {
         showInbound = true
         showModified = true
         showDeleted = true
+        showDaemonEvents = true
         searchText = ""
     }
 
@@ -224,6 +246,9 @@ final class ActivityDisplayModel: ObservableObject {
         if !searchText.isEmpty {
             text += " matching “\(searchText)”"
         }
+        if !showDaemonEvents {
+            text += " (folder & device events hidden)"
+        }
         return text
     }
 }
@@ -244,6 +269,11 @@ struct ActivityFilterPopoverView: View {
                 .font(.subheadline.weight(.semibold))
             Toggle("This Mac", isOn: $display.showOutbound)
             Toggle("Other Devices", isOn: $display.showInbound)
+            Divider()
+                .padding(.vertical, 4)
+            Text("Also Show")
+                .font(.subheadline.weight(.semibold))
+            Toggle("Folder & Device Events", isOn: $display.showDaemonEvents)
         }
         .toggleStyle(.checkbox)
         .padding(14)
@@ -386,10 +416,11 @@ private struct NameCell: View {
 
     var body: some View {
         let deleted = entry.operation == .deleted && entry.bulkCount == nil
+        // Summaries and markers read quieter than files.
+        let quiet = entry.bulkCount != nil || entry.kind.isMarker
         Text(entry.displayName)
             .strikethrough(deleted)
-            .foregroundStyle(entry.bulkCount == nil
-                             ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+            .foregroundStyle(quiet ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
             .truncationMode(.middle)
             .help(deleted ? "\(entry.displayName) — deleted" : entry.displayName)
             .accessibilityLabel(deleted ? "\(entry.displayName), deleted"
@@ -453,6 +484,43 @@ private struct EventCell: View {
         case let .failed(message):
             ("exclamationmark.triangle", .red, "Failed",
              "Failed: \(message)")
+        // Markers: the log's own lifecycle, set quiet (secondary) — they
+        // are context, not activity.
+        case .recordingStarted:
+            ("record.circle", .secondary, "Recording started",
+             "Recording started — activity from here on was witnessed")
+        case .recordingPaused:
+            ("pause.circle", .secondary, "Recording paused",
+             "Recording paused — nothing was witnessed until the next start")
+        case .connected:
+            ("network", .secondary, "Connected",
+             "Connected to Syncthing")
+        case .disconnected:
+            ("network.slash", .secondary, "Disconnected",
+             "Lost the connection to Syncthing — nothing was witnessed until it returned")
+        // Daemon events: what happened to a folder or device. Attention
+        // colors only where something needs attention.
+        case .devicePaused, .folderPaused:
+            ("pause.circle", .orange, "Paused",
+             "Paused — not syncing until resumed")
+        case .deviceResumed, .folderResumed:
+            ("play.circle", .secondary, "Resumed",
+             "Resumed — syncing again")
+        case .deviceOnline:
+            ("antenna.radiowaves.left.and.right", .secondary, "Online",
+             "The device connected")
+        case .deviceOffline:
+            ("antenna.radiowaves.left.and.right.slash", .secondary, "Offline",
+             "The device disconnected")
+        case let .folderError(message):
+            ("exclamationmark.triangle", .red, "Stopped",
+             "The folder stopped with an error: \(message)")
+        case let .watchFailed(message):
+            ("eye.trianglebadge.exclamationmark", .red, "Watch failed",
+             "Changes are no longer noticed as they happen; only periodic rescans will: \(message)")
+        case .watchRestored:
+            ("eye", .secondary, "Watch restored",
+             "Changes are noticed as they happen again")
         }
     }
 }

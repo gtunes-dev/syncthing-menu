@@ -38,6 +38,7 @@ final class SettingsWindowController {
                                     appSettings: settings.app,
                                     syncthingSettings: settings.syncthing,
                                     daemonSettings: settings.daemon,
+                                    activitySettings: settings.activity,
                                     loginItem: loginItem,
                                     folderHealth: folderHealth,
                                     status: status)

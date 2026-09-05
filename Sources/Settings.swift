@@ -63,9 +63,11 @@ final class Settings {
     let app: UpdateChannelSettings
     let syncthing: UpdateChannelSettings
     let daemon: DaemonModeSettings
+    let activity: ActivitySettings
 
     init(defaults: UserDefaults = .standard, secrets: SecretStore = KeychainSecretStore()) {
         Self.migrateLegacyKeys(in: defaults)
+        activity = ActivitySettings(defaults: defaults)
         // Default: check on, install off (surface updates, but don't apply unattended).
         app = UpdateChannelSettings(defaults: defaults, prefix: "app",
                                     autoCheckDefault: true, autoInstallDefault: false)

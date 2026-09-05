@@ -38,6 +38,9 @@ final class FakeSyncthingServer {
         var sharedWith: [String]? = nil
         /// Current scan/pull errors, served by /rest/folder/errors.
         var errors: [(path: String, error: String)] = []
+        /// The folder-level error text /rest/db/status reports (a stopped
+        /// folder); nil = healthy.
+        var error: String? = nil
     }
 
     // MARK: - Scriptable state (all access serialized on `queue`)
@@ -111,6 +114,31 @@ final class FakeSyncthingServer {
     var failNextRequests: Int {
         get { queue.sync { _failNextRequests } }
         set { queue.sync { _failNextRequests = newValue } }
+    }
+
+    /// Park every request whose path contains `substring` — the connection
+    /// stays open, no response — until `releaseHeldRequests()`. Lets a test
+    /// freeze a consumer mid-batch on a network await and act on it
+    /// meanwhile (the activity feed's commit-epoch contract).
+    private var _holdSubstring: String?
+    private var _heldRequests: [(Request, NWConnection)] = []
+
+    func holdRequests(containing substring: String) {
+        queue.sync { _holdSubstring = substring }
+    }
+
+    var heldRequestCount: Int {
+        queue.sync { _heldRequests.count }
+    }
+
+    /// Stop holding and answer every parked request normally.
+    func releaseHeldRequests() {
+        queue.sync {
+            _holdSubstring = nil
+            let held = _heldRequests
+            _heldRequests = []
+            for (request, connection) in held { dispatch(request, on: connection) }
+        }
     }
 
     /// Every `autoUpgradeIntervalH` value PATCHed to /rest/config/options, in
@@ -290,6 +318,14 @@ final class FakeSyncthingServer {
 
     private func handle(_ request: Request, on connection: NWConnection) {
         _requestedPaths.append(request.path)
+        if let hold = _holdSubstring, request.path.contains(hold) {
+            _heldRequests.append((request, connection))
+            return
+        }
+        dispatch(request, on: connection)
+    }
+
+    private func dispatch(_ request: Request, on connection: NWConnection) {
         if _failNextRequests > 0 {
             _failNextRequests -= 1
             send(["error": "scripted failure"], status: 500, on: connection)
@@ -333,8 +369,9 @@ final class FakeSyncthingServer {
                      .map { ["deviceID": $0] }] as [String: Any]
             }, on: connection)
         case ("GET", "/rest/db/status"):
-            let state = _folders.first { $0.id == query["folder"] }?.state ?? "idle"
-            send(["state": state], on: connection)
+            let folder = _folders.first { $0.id == query["folder"] }
+            send(["state": folder?.state ?? "idle", "error": folder?.error ?? ""],
+                 on: connection)
         case ("GET", "/rest/folder/errors"):
             guard let folder = _folders.first(where: { $0.id == query["folder"] }),
                   !folder.paused else {

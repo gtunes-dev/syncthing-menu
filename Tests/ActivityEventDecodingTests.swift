@@ -27,6 +27,32 @@ struct ActivityEventDecodingTests {
         #expect(event.modifiedBy == nil)
     }
 
+    /// StateChanged carries from/to/duration; FolderWatchStateChanged reuses
+    /// from/to for error text; FolderPaused names its folder as `id` +
+    /// `label` (exposed raw as `dataID`, which the device fallback also
+    /// picks up — the feed must read the folder from `dataID`, not `device`).
+    @Test func daemonEventShapesDecode() throws {
+        let state = try decode([
+            "id": 9, "type": "StateChanged", "time": "2026-09-04T10:00:00Z",
+            "data": ["folder": "f1", "from": "scanning", "to": "idle", "duration": 12.5],
+        ])
+        #expect(state.folder == "f1" && state.from == "scanning" && state.to == "idle")
+        #expect(state.duration == 12.5)
+
+        let watch = try decode([
+            "id": 10, "type": "FolderWatchStateChanged", "time": "2026-09-04T10:00:00Z",
+            "data": ["folder": "f1", "to": "too many open files"],
+        ])
+        #expect(watch.from == nil && watch.to == "too many open files")
+
+        let paused = try decode([
+            "id": 11, "type": "FolderPaused", "time": "2026-09-04T10:00:00Z",
+            "data": ["id": "abcde-fghij", "label": "My folder"],
+        ])
+        #expect(paused.folder == nil && paused.dataID == "abcde-fghij")
+        #expect(paused.label == "My folder")
+    }
+
     /// Disk-change events carry the path as `path`, plus label and modifiedBy.
     @Test func diskEventFlattensPathAndAttribution() throws {
         let event = try decode([

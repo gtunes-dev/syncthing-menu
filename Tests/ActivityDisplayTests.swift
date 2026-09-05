@@ -85,6 +85,62 @@ struct ActivityDisplayTests {
 
     /// Bulk entries summarize their count in the Name column; per-item
     /// entries show their path.
+    /// Markers pass every checkbox filter (they explain the gaps in whatever
+    /// remains visible, and carry their statement as the name) but NOT a
+    /// name search: a search shows file rows only.
+    @Test func markersBypassFiltersButNotSearch() {
+        let model = ActivityDisplayModel()
+        model.showOutbound = false
+        model.showInbound = false
+        model.showModified = false
+        model.showDeleted = false
+        model.searchText = "nothing-matches-this"
+        #expect(!model.allows(ActivityFeed.Entry.marker(.connected, time: Date())))
+        model.searchText = ""
+        let markers: [ActivityFeed.Entry.Kind] = [
+            .recordingStarted(.windowOpened), .recordingPaused(.windowClosed),
+            .recordingStarted(.policySetToAlways),
+            .recordingPaused(.policySetToWhileWindowOpen),
+            .connected, .disconnected,
+        ]
+        for kind in markers {
+            let entry = ActivityFeed.Entry.marker(kind, time: Date())
+            #expect(model.allows(entry), "\(kind)")
+            #expect(!entry.displayName.isEmpty, "\(kind)")
+            #expect(entry.kind.isMarker)
+        }
+        #expect(ActivityFeed.Entry.marker(.recordingPaused(.windowClosed), time: Date())
+                    .displayName == "Activity window closed")
+    }
+
+    /// Daemon events (folder & device rows) follow their own switch, are
+    /// hidden under a name search, count toward the active-filter state,
+    /// and announce their hiding in the bar. Statements: blank where the
+    /// subject is the column, text for errors and scan durations.
+    @Test func daemonEventsHaveTheirOwnFilterGroup() {
+        let model = ActivityDisplayModel()
+        let paused = ActivityFeed.Entry.daemonEvent(.devicePaused, time: Date(), party: "Laptop")
+        let error = ActivityFeed.Entry.daemonEvent(.folderError("path missing"), time: Date(),
+                                                   folderID: "f", folderLabel: "F")
+        #expect(model.allows(paused) && model.allows(error))
+        #expect(!model.isActive)
+
+        model.showDaemonEvents = false
+        #expect(!model.allows(paused) && !model.allows(error))
+        #expect(model.allows(makeEntry()))
+        #expect(model.isActive)
+        #expect(model.summary == "Showing changes (folder & device events hidden)")
+
+        model.clear()
+        #expect(model.allows(paused))
+        model.searchText = "a"
+        #expect(!model.allows(paused))          // no path to match
+
+        #expect(paused.displayName == "")
+        #expect(error.displayName == "path missing")
+        #expect(paused.kind.isDaemonEvent && !paused.kind.isMarker && !paused.kind.isOutbound)
+    }
+
     @Test func displayNameSummarizesBulkEntries() {
         #expect(makeEntry(bulkCount: 1).displayName == "1 change")
         #expect(makeEntry(bulkCount: 312).displayName == "312 changes")

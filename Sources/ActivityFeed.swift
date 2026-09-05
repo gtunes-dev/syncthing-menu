@@ -102,18 +102,63 @@ import Foundation
 /// for offline devices, zero cost while no loops are open. The event path
 /// stays primary; a sweep that actually closes something logs the fact.
 ///
-/// ## Lifecycle & frugality (unchanged contracts)
+/// ## Daemon events (the third row family, added 2026-09-04)
 ///
-/// The window shows ACTIVITY WITNESSED WHILE OPEN — no seeding of any kind
-/// (not history: delivery-blind; not the work queue: backlog is not
+/// Beyond file facts and recording markers, the log records what happened
+/// to FOLDERS and DEVICES, from the daemon's own events, under one
+/// selection test: would someone reading the log later want to know it
+/// happened, and when? Live state stays the menu's job. Recorded: device
+/// and folder pause/resume (a same-batch burst — our own Pause All verb —
+/// coalesces to "N devices"), peers going online/offline, a folder
+/// entering `error` (one bounded `db/status` read fetches the text the
+/// event lacks), and the filesystem watcher failing or recovering.
+///
+/// Folder SCANS are deliberately not recorded (settled 2026-09-04 after
+/// two builds): the wanted rows were the SCHEDULED rescans, as a start and
+/// an end with the duration, and never the watcher's subpath scans that
+/// follow every change batch — but StateChanged is the only scan signal
+/// and it is identical for a scheduled rescan, a watcher scan, and Rescan
+/// All (folder, from, to, duration; no cause anywhere in the events or
+/// REST). Timing against the rescan interval fails (Syncthing jitters the
+/// schedule and watcher scans land anywhere), "scans that found changes"
+/// fails both ways, FolderScanProgress measures bytes hashed. The one
+/// accurate case — folders with the watcher disabled — is too odd an
+/// ergonomics to ship. Rows we can't vouch for don't belong in the log. Evaluated and skipped, with
+/// reasons, in `.claude/notes` (progress streams, FolderErrors' retry
+/// re-emission, startup events unobservable by a fresh subscription,
+/// network/protocol internals). These rows are gated by the display's own
+/// "folder & device events" switch and hidden under a name search.
+///
+/// ## Lifecycle & frugality
+///
+/// The log holds ACTIVITY WITNESSED WHILE RECORDING — no seeding of any
+/// kind (not history: delivery-blind; not the work queue: backlog is not
 /// activity — standing state of any kind is Syncthing's own UI's job, via
 /// Open Syncthing; the in-window Devices panel that once carried it was
-/// removed 2026-08-18 as undiscoverable and duplicative). Closing drops
-/// everything; every open starts EMPTY. The long-poll loop (`EventStream`)
-/// runs ONLY while the window is visible and the session is connected;
-/// closed window = zero cost. All confirmation queries are bounded and
-/// gated — by events, or by stale open loops — never timer-driven, never
-/// per-row; offline peers cost nothing.
+/// removed 2026-08-18 as undiscoverable and duplicative). Recording runs
+/// while it is WANTED — the policy says always, or the window is open — AND
+/// POSSIBLE — the session has a live endpoint; the long-poll loop
+/// (`EventStream`) exists exactly then, so under the default policy a
+/// closed window is zero cost. Entries survive everything short of an
+/// explicit clear; what a stop drops depends on WHY it stopped:
+///
+/// - **Pause** (recording no longer wanted): the daemon keeps syncing while
+///   nobody watches, so every open loop is stale by construction — a loop
+///   kept across a pause would later stamp an hours-old delivery with the
+///   probe time (lag turned lie), pair a delivery with a detection of a
+///   different change, or report a since-deleted file delivered. The
+///   ledger and every per-tick structure are FLUSHED; the log keeps its
+///   rows. Resuming is a fresh open against retained rows: a transfer that
+///   spans the pause reappears as a new sending entry (create-on-mention)
+///   and earns its delivered from real evidence.
+/// - **Disconnect** (endpoint gone): the daemon is down, nothing was
+///   delivered in the gap, the loops are genuinely still open — the
+///   ledger is KEPT and their endings arrive from real events after the
+///   reconnect (the reseed clears only the per-tick state).
+///
+/// All confirmation queries are bounded and gated — by events, or by stale
+/// open loops — never timer-driven, never per-row; offline peers cost
+/// nothing.
 @MainActor
 final class ActivityFeed: ObservableObject {
 
@@ -137,12 +182,110 @@ final class ActivityFeed: ObservableObject {
             case applied            // an inbound change finished applying here
             case failed(String)     // an inbound apply failed (error text)
 
+            // The log's OWN lifecycle — markers, not sync facts: where the
+            // record is discontinuous. Started/paused follow flips of
+            // "recording wanted" (window or policy), unconditionally;
+            // connected/disconnected follow flips of the endpoint, only
+            // while recording is wanted (a paused period hides everything,
+            // daemon restarts included). Launch counts as a transition, so
+            // every log begins with a started marker. Emitted on FLIPS only
+            // — the inputs re-announce unchanged states — and never paired:
+            // a connected may follow a started with no disconnected between
+            // (window reopened during an outage, then the daemon returns);
+            // that is the truth. Cap eviction can orphan a marker — accepted.
+            case recordingStarted(MarkerReason)
+            case recordingPaused(MarkerReason)
+            case connected
+            case disconnected
+
+            // DAEMON EVENTS — the third family: things that happened to a
+            // folder or device (not to a file), witnessed from the daemon's
+            // own events. The selection test (2026-09-04): an event earns a
+            // row if someone reading the log LATER would want to know it
+            // happened, and when — live state is the menu's job, the log's
+            // value is history. The subject rides the Folder or Device
+            // column; the Name column carries the statement where there is
+            // one (an error text, a scan duration), else stays blank.
+            case devicePaused              // party = device (or "N devices")
+            case deviceResumed
+            case folderPaused              // folder = the folder (or "N folders")
+            case folderResumed
+            case deviceOnline              // a peer connected to us
+            case deviceOffline
+            case folderError(String)       // folder entered `error`; the text
+            case watchFailed(String)       // the fs watcher stopped; the text
+            case watchRestored
+
+            var isMarker: Bool {
+                switch self {
+                case .recordingStarted, .recordingPaused, .connected, .disconnected: true
+                default: false
+                }
+            }
+
+            var isDaemonEvent: Bool {
+                switch self {
+                case .devicePaused, .deviceResumed, .folderPaused, .folderResumed,
+                     .deviceOnline, .deviceOffline, .folderError,
+                     .watchFailed, .watchRestored: true
+                default: false
+                }
+            }
+
+            /// Direction of a sync fact. Markers and daemon events are
+            /// neither (the filter admits or excludes them before asking).
             var isOutbound: Bool {
                 switch self {
                 case .detected, .sending, .delivered: true
-                case .downloading, .applied, .failed: false
+                default: false
                 }
             }
+
+            /// The Name column text for the non-file families — nil for a
+            /// file fact (whose name is its path), empty for a daemon event
+            /// whose subject lives entirely in the Folder/Device column.
+            /// (Provisional copy, pending the visual-language pass.)
+            var statement: String? {
+                switch self {
+                case .recordingStarted(.windowOpened): "Activity window opened"
+                case .recordingStarted(.policySetToAlways): "Recording set to always"
+                case .recordingPaused(.windowClosed): "Activity window closed"
+                case .recordingPaused(.policySetToWhileWindowOpen):
+                    "Recording set to while the window is open"
+                case .recordingStarted, .recordingPaused: nil   // unreachable pairings
+                case .connected: "Syncthing connected"
+                case .disconnected: "Syncthing disconnected"
+                case .devicePaused, .deviceResumed, .folderPaused, .folderResumed,
+                     .deviceOnline, .deviceOffline, .watchRestored: ""
+                case let .folderError(text), let .watchFailed(text): text
+                default: nil
+                }
+            }
+        }
+
+        /// Which input flipped "recording wanted" — the marker's reason.
+        enum MarkerReason: Equatable {
+            case windowOpened
+            case windowClosed
+            case policySetToAlways
+            case policySetToWhileWindowOpen
+        }
+
+        /// A marker entry: no folder, path, or party — only the kind and
+        /// the wall-clock time of the transition.
+        static func marker(_ kind: Kind, time: Date) -> Entry {
+            Entry(time: time, kind: kind, folderID: "", folderLabel: "", path: "",
+                  operation: .modified, bulkCount: nil, party: nil)
+        }
+
+        /// A daemon-event entry: the subject in the Folder and/or Device
+        /// column, no path. `bulkCount` marks a coalesced burst ("3
+        /// devices") the way it marks bulk file entries.
+        static func daemonEvent(_ kind: Kind, time: Date, folderID: String = "",
+                                folderLabel: String = "", party: String? = nil,
+                                bulkCount: Int? = nil) -> Entry {
+            Entry(time: time, kind: kind, folderID: folderID, folderLabel: folderLabel,
+                  path: "", operation: .modified, bulkCount: bulkCount, party: party)
         }
 
         let id = UUID()
@@ -176,6 +319,7 @@ final class ActivityFeed: ObservableObject {
         /// The Name column's text: the path, except bulk entries summarize
         /// their count.
         var displayName: String {
+            if let statement = kind.statement { return statement }
             guard let bulkCount else { return path }
             return bulkCount == 1 ? "1 change" : "\(bulkCount.formatted()) changes"
         }
@@ -198,6 +342,10 @@ final class ActivityFeed: ObservableObject {
             case .detected: 3
             case .delivered: 4
             case .applied: 5
+            case .folderError, .watchFailed: 6
+            case .devicePaused, .deviceResumed, .folderPaused, .folderResumed,
+                 .deviceOnline, .deviceOffline, .watchRestored: 7
+            case .recordingStarted, .recordingPaused, .connected, .disconnected: 8
             }
         }
     }
@@ -224,6 +372,13 @@ final class ActivityFeed: ObservableObject {
     /// stream wakes every ~5s, and one probe per wake would break the
     /// "a few small reads per minute" cost promise.
     private static let sweepMinInterval: TimeInterval = 30
+    /// Transfer-end availability reads resolved per wake. A burst of ends
+    /// (the final empty progress report after a big batch) would otherwise
+    /// fan out into hundreds of concurrent `db/file` reads against the
+    /// worker doing the sync. The rest wait for the next wake — ~5s during
+    /// a transfer, ≤50s idle — and the quiescence sweep confirms any that
+    /// go stale before their turn.
+    private static let deliveryCheckBudget = 20
 
     /// All stored properties have defaults; nonisolated so the owner (a
     /// nonisolated app delegate) can create the feed at construction time.
@@ -238,7 +393,20 @@ final class ActivityFeed: ObservableObject {
 
     private var api: SyncthingAPI?
     private var windowVisible = false
+    private(set) var recordingPolicy: ActivityRecordingPolicy = .whileWindowOpen
+    /// Whether recording is WANTED (policy or window), independent of the
+    /// endpoint. Stored so a flip can be told from a repeat — the window
+    /// controller and the session both re-announce unchanged states — and
+    /// a flip to off is what flushes the open loops (a pause).
+    private var isDesired = false
     private var stream: EventStream<SyncthingAPI.ActivityEvent>?
+    /// Bumped whenever the log is replaced from outside the batch pipeline
+    /// (loop start/stop, clear). A batch parks on network awaits mid-way and
+    /// commits a snapshot taken at its start; it commits only if the epoch
+    /// it started under is still current, so a pause or clear landing while
+    /// a batch is parked is never overwritten by that batch. The same guard
+    /// retires the fire-and-forget delivery checks of a stopped loop.
+    private var logEpoch = 0
 
     // Identity tables (refreshed at loop start and on ConfigSaved).
     /// Folder id → display label; the item events carry only the folder id.
@@ -287,6 +455,14 @@ final class ActivityFeed: ObservableObject {
     /// event, so a marker never outlives one index cycle and a genuinely
     /// new later change always logs.
     private var recoveredDetections: Set<ItemKey> = []
+    /// The bulk-tier twin of `recoveredDetections`: when the backstop
+    /// recovers a folder's changes IN BULK (index event first, at scale),
+    /// the change events that follow are the same changes — each consumes
+    /// one from this budget instead of logging, or the burst would
+    /// coalesce into a second identical "N changes" row (seen live
+    /// 2026-09-04). Retired at the folder's next index cycle, like the
+    /// per-item markers.
+    private var recoveredBulkBudget: [String: Int] = [:]
 
     private struct TransferKey: Hashable {
         let folder: String
@@ -305,39 +481,108 @@ final class ActivityFeed: ObservableObject {
         let path: String
     }
 
-    // MARK: - Session & window lifecycle
+    // MARK: - Recording lifecycle
+
+    /// Recording runs iff it is wanted (`isDesired`: the policy says always,
+    /// or the window is open) AND possible (a live endpoint). The three
+    /// inputs below each store their value and `reconcile()`; nothing else
+    /// starts or stops the loop. See the class doc for what a pause drops
+    /// versus what a disconnect keeps.
 
     /// Session fan-out, mirroring `SyncthingMonitor`: safe to call on every
-    /// publish (restarts the loop against the fresh endpoint if active).
+    /// publish (restarts the loop against the fresh endpoint if recording).
+    /// The connected marker keys off the nil→endpoint FLIP only — blip
+    /// recoveries republish the same endpoint.
     func connect(api: SyncthingAPI) {
+        let wasConnected = self.api != nil
         self.api = api
-        if windowVisible { startLoop() }
+        if !wasConnected, isDesired { appendMarker(.connected) }
+        syncLoop(restarting: true)
     }
 
     /// The daemon is gone; its event stream and subscriptions died with it.
-    /// Entries stay — the log remains readable in the open window.
+    /// Entries AND open loops stay (nothing syncs while the daemon is down).
     func disconnect() {
+        if api != nil, isDesired { appendMarker(.disconnected) }
         api = nil
-        stopLoop()
+        syncLoop()
     }
 
-    /// The window controller's visibility signal — the feature's on/off
-    /// switch. Closing DROPS the log and every open loop: the window is a
-    /// "happening now" view, not an archive. Every open starts fresh.
+    /// The window controller's visibility signal.
     func setWindowVisible(_ visible: Bool) {
         windowVisible = visible
-        if visible {
-            startLoop()
+        reconcileDesired(started: .windowOpened, paused: .windowClosed)
+    }
+
+    /// The user's policy (Settings). At launch the delegate applies the
+    /// persisted policy before the session connects, so `always` begins the
+    /// log with a started marker, then connected — launch is a transition.
+    func setRecordingPolicy(_ policy: ActivityRecordingPolicy) {
+        recordingPolicy = policy
+        reconcileDesired(started: .policySetToAlways, paused: .policySetToWhileWindowOpen)
+    }
+
+    /// Re-derive "recording wanted" after a window or policy input changed;
+    /// a flip logs its marker (with the reason the caller supplies — the
+    /// input that moved) and, going off, pauses. Then align the loop.
+    private func reconcileDesired(started: Entry.MarkerReason,
+                                  paused: Entry.MarkerReason) {
+        let desired = recordingPolicy == .always || windowVisible
+        if desired != isDesired {
+            isDesired = desired
+            if desired {
+                appendMarker(.recordingStarted(started))
+            } else {
+                appendMarker(.recordingPaused(paused))
+                pause()
+            }
+        }
+        syncLoop()
+    }
+
+    /// The loop exists iff recording is wanted AND possible.
+    private func syncLoop(restarting: Bool = false) {
+        if isDesired, api != nil {
+            if stream == nil || restarting { startLoop() }
         } else {
             stopLoop()
-            entries = []
-            ledger.removeAll()
-            reportedDownloads = [:]
-            pendingDeliveryChecks = []
-            witnessedSinceIndexUpdate = [:]
-            recoveredDetections = []
-            lastSweep = [:]
         }
+    }
+
+    /// Markers land outside the batch pipeline, so they advance the epoch:
+    /// a batch parked mid-await must not commit over them.
+    private func appendMarker(_ kind: Entry.Kind) {
+        logEpoch += 1
+        commit([Entry.marker(kind, time: now())] + entries)
+    }
+
+    /// The user's Clear: empty the log and flush the open loops (a cleared
+    /// log must not later receive a delivered whose detected the user
+    /// removed). No marker — an empty log explains itself. Recording, if
+    /// running, continues: only the batch parked right now, if any, is
+    /// dropped (epoch).
+    func clear() {
+        logEpoch += 1
+        entries = []
+        flushOpenLoops()
+    }
+
+    /// Recording is no longer wanted: drop every open loop and per-tick
+    /// structure (all stale the moment nobody watches — class doc), keep
+    /// the rows.
+    private func pause() {
+        stopLoop()
+        flushOpenLoops()
+    }
+
+    private func flushOpenLoops() {
+        ledger.removeAll()
+        pendingDeliveryChecks = []
+        reportedDownloads = [:]
+        witnessedSinceIndexUpdate = [:]
+        recoveredDetections = []
+        recoveredBulkBudget = [:]
+        lastSweep = [:]
     }
 
     // MARK: - The event loop
@@ -348,6 +593,7 @@ final class ActivityFeed: ObservableObject {
     private func startLoop() {
         guard let api else { return }
         stopLoop()
+        logEpoch += 1
         let stream = EventStream<SyncthingAPI.ActivityEvent>(
             label: "activity",
             fetch: { try await api.activityEvents(since: $0, timeout: $1, limit: $2) },
@@ -362,6 +608,7 @@ final class ActivityFeed: ObservableObject {
                 self.reportedDownloads = [:]
                 self.witnessedSinceIndexUpdate = [:]
                 self.recoveredDetections = []
+                self.recoveredBulkBudget = [:]
                 // Deliberately NO entry seeding — the window renders
                 // witnessed activity only (see the class doc).
             },
@@ -374,8 +621,10 @@ final class ActivityFeed: ObservableObject {
     }
 
     private func stopLoop() {
+        guard stream != nil else { return }
         stream?.stop()
         stream = nil
+        logEpoch += 1   // an in-flight batch of the stopped loop must not commit
     }
 
     /// Identity tables, read at loop start and re-read when ConfigSaved
@@ -423,6 +672,24 @@ final class ActivityFeed: ObservableObject {
         /// bulk detected entry per folder is emitted after the event loop.
         var bulkDetected: [String: (count: Int, time: Date)] = [:]
         var sawConfigChange = false
+        /// Pause/resume events this batch, by kind — a burst (Pause All)
+        /// coalesces to one "N devices" / "N folders" row.
+        var stateChanges: [StateChangeKind: Coalesced] = [:]
+        /// Folders that entered `error` this batch: one bounded status
+        /// read each, after the loop, for the error text.
+        var errorFolders: [(folder: String, time: Date)] = []
+    }
+
+    enum StateChangeKind: Hashable {
+        case devicePaused, deviceResumed, folderPaused, folderResumed
+    }
+
+    struct Coalesced {
+        /// Display names (device names or folder labels), in event order.
+        var names: [String] = []
+        /// The folder ids, for folder kinds (device kinds leave it empty).
+        var folderIDs: [String] = []
+        var time: Date
     }
 
     /// One wake of the stream (`handle` runs on EVERY wake, including empty
@@ -437,6 +704,7 @@ final class ActivityFeed: ObservableObject {
     /// 7. housekeeping: identity refresh when ConfigSaved arrived
     private func handleBatch(_ events: [SyncthingAPI.ActivityEvent],
                              api: SyncthingAPI) async {
+        let epoch = logEpoch
         var context = BatchContext(entries: entries)
         var detectionCounts: [String: Int] = [:]
         for event in events where event.type == "LocalChangeDetected" {
@@ -450,9 +718,15 @@ final class ActivityFeed: ObservableObject {
             apply(event, to: &context)
         }
         logBulkDetections(&context)
+        logStateChanges(&context)
+        await logFolderErrors(&context, api: api)
         await confirmDeliveries(context.deliveryTriggers, api: api,
                                 entries: &context.entries)
         await sweepStaleLoops(api: api, entries: &context.entries)
+        // The awaits above parked this batch; if the log was replaced
+        // underneath (pause, clear, loop restart) its snapshot is stale —
+        // drop it rather than overwrite what happened meanwhile.
+        guard logEpoch == epoch else { return }
         commit(context.entries)
         resolvePendingDeliveryChecks(api: api)
 
@@ -479,11 +753,66 @@ final class ActivityFeed: ObservableObject {
             return
         case "DeviceConnected":
             // Connectivity gates the sweep (only connected sharers are
-            // probed) — maintained even with no UI consuming it directly.
-            if let device = event.device { connectedIDs.insert(device) }
+            // probed) — and a peer coming online is a daemon-event row.
+            // The daemon emits DeviceConnected per CONNECTION (a relay→direct
+            // upgrade or a second connection fires it again with no
+            // disconnect between — seen live 2026-09-04 as tripled Online
+            // rows), so the row follows the device-level FLIP of our set.
+            guard let device = event.device, device != myID else { return }
+            guard connectedIDs.insert(device).inserted else { return }
+            context.entries.insert(Entry.daemonEvent(.deviceOnline, time: event.time,
+                                                     party: displayName(forFullID: device)),
+                                   at: 0)
             return
         case "DeviceDisconnected":
-            if let device = event.device { connectedIDs.remove(device) }
+            guard let device = event.device, device != myID else { return }
+            guard connectedIDs.remove(device) != nil else { return }
+            context.entries.insert(Entry.daemonEvent(.deviceOffline, time: event.time,
+                                                     party: displayName(forFullID: device)),
+                                   at: 0)
+            return
+        case "DevicePaused", "DeviceResumed":
+            guard let device = event.device, device != myID else { return }
+            let kind: StateChangeKind = event.type == "DevicePaused" ? .devicePaused
+                                                                      : .deviceResumed
+            var group = context.stateChanges[kind] ?? Coalesced(time: event.time)
+            group.names.append(displayName(forFullID: device))
+            group.time = event.time
+            context.stateChanges[kind] = group
+            return
+        case "FolderPaused", "FolderResumed":
+            // These say `id` + `label`, not `folder` (upstream shape).
+            guard let folder = event.folder ?? event.dataID else { return }
+            let kind: StateChangeKind = event.type == "FolderPaused" ? .folderPaused
+                                                                      : .folderResumed
+            var group = context.stateChanges[kind] ?? Coalesced(time: event.time)
+            let label = event.label.flatMap { $0.isEmpty ? nil : $0 } ?? folderLabel(for: folder)
+            group.names.append(label)
+            group.folderIDs.append(folder)
+            group.time = event.time
+            context.stateChanges[kind] = group
+            return
+        case "StateChanged":
+            guard let folder = event.folder else { return }
+            // Only the error transition is a row. Scans are deliberately
+            // NOT recorded (class doc): the event cannot say why a folder
+            // scanned, and rows we can't vouch for don't belong in the log.
+            if event.to == "error" {
+                context.errorFolders.append((folder, event.time))
+            }
+            return
+        case "FolderWatchStateChanged":
+            guard let folder = event.folder else { return }
+            let label = folderLabel(for: folder)
+            if let text = event.to, !text.isEmpty {
+                context.entries.insert(Entry.daemonEvent(.watchFailed(text), time: event.time,
+                                                         folderID: folder, folderLabel: label),
+                                       at: 0)
+            } else if let previous = event.from, !previous.isEmpty {
+                context.entries.insert(Entry.daemonEvent(.watchRestored, time: event.time,
+                                                         folderID: folder, folderLabel: label),
+                                       at: 0)
+            }
             return
         default:
             break
@@ -517,6 +846,12 @@ final class ActivityFeed: ObservableObject {
                                      at: now())
                     }
                 }
+                return
+            }
+            // The bulk twin: this change was already counted by a bulk
+            // recovery (index event first, at scale) — consume, don't log.
+            if let budget = recoveredBulkBudget[folder], budget > 0 {
+                recoveredBulkBudget[folder] = budget - 1
                 return
             }
             if context.bulkFolders.contains(folder) {
@@ -680,8 +1015,10 @@ final class ActivityFeed: ObservableObject {
         let witnessed = witnessedSinceIndexUpdate.removeValue(forKey: folder) ?? []
         // A new index cycle: change events covered by the PREVIOUS cycle
         // have long since arrived, so unconsumed recovery markers are
-        // genuinely-lost events — retire them (their entries stand).
+        // genuinely-lost events — retire them (their entries stand). The
+        // bulk budget retires the same way.
         recoveredDetections = recoveredDetections.filter { $0.folder != folder }
+        recoveredBulkBudget[folder] = nil
 
         if let filenames = event.filenames, filenames.count == items {
             let unwitnessed = filenames.filter { !witnessed.contains($0) }
@@ -707,12 +1044,15 @@ final class ActivityFeed: ObservableObject {
         }
     }
 
+    /// Backstop-only: a bulk recovery also funds the budget the folder's
+    /// late-arriving change events will consume (see `recoveredBulkBudget`).
     private func addBulkDetections(count: Int, folder: String, time: Date,
                                    to context: inout BatchContext) {
         var bulk = context.bulkDetected[folder] ?? (count: 0, time: time)
         bulk.count += count
         bulk.time = time
         context.bulkDetected[folder] = bulk
+        recoveredBulkBudget[folder, default: 0] += count
     }
 
     /// Log per-item detected entries for names the backstop recovered.
@@ -840,16 +1180,18 @@ final class ActivityFeed: ObservableObject {
     /// fire-and-forget — our own index says whether the device now has the
     /// file. Confirmed → a delivered entry; unconfirmed (failed transfer,
     /// re-queued, lookup failure) → nothing, honestly. Bounded by the
-    /// mention rate; costs nothing while no transfers end.
+    /// mention rate AND per wake (`deliveryCheckBudget`); costs nothing
+    /// while no transfers end.
     private func resolvePendingDeliveryChecks(api: SyncthingAPI) {
-        let pending = pendingDeliveryChecks
-        pendingDeliveryChecks.removeAll()
+        let pending = Array(pendingDeliveryChecks.prefix(Self.deliveryCheckBudget))
+        pendingDeliveryChecks.removeFirst(pending.count)
+        let epoch = logEpoch
         for check in pending {
             Task { @MainActor in
                 guard let status = try? await api.fileStatus(folder: check.folder,
                                                              file: check.path),
                       status.availableOn.contains(check.device),
-                      self.windowVisible else { return }
+                      self.logEpoch == epoch else { return }   // loop still current
                 let operation = self.ledger.closeItem(folder: check.folder,
                                                       path: check.path)?.operation
                     ?? .modified
@@ -867,6 +1209,54 @@ final class ActivityFeed: ObservableObject {
     /// entries for the loops we tracked by name, one bulk delivered entry
     /// for the count-only loop — endings at the same granularity as their
     /// beginnings (principle 5).
+    // MARK: - Daemon events (folder & device rows)
+
+    /// Emit the batch's pause/resume rows: one per subject, or one
+    /// coalesced "N devices" / "N folders" row when a batch carried a burst
+    /// (Pause All Devices fires one event per device).
+    private func logStateChanges(_ context: inout BatchContext) {
+        let order: [StateChangeKind] = [.devicePaused, .deviceResumed,
+                                        .folderPaused, .folderResumed]
+        for kind in order {
+            guard let group = context.stateChanges[kind], !group.names.isEmpty else { continue }
+            let entryKind: Entry.Kind
+            switch kind {
+            case .devicePaused: entryKind = .devicePaused
+            case .deviceResumed: entryKind = .deviceResumed
+            case .folderPaused: entryKind = .folderPaused
+            case .folderResumed: entryKind = .folderResumed
+            }
+            let isFolder = kind == .folderPaused || kind == .folderResumed
+            let entry: Entry
+            if group.names.count == 1 {
+                entry = Entry.daemonEvent(entryKind, time: group.time,
+                                          folderID: isFolder ? group.folderIDs[0] : "",
+                                          folderLabel: isFolder ? group.names[0] : "",
+                                          party: isFolder ? nil : group.names[0])
+            } else {
+                let summary = "\(group.names.count) \(isFolder ? "folders" : "devices")"
+                entry = Entry.daemonEvent(entryKind, time: group.time,
+                                          folderLabel: isFolder ? summary : "",
+                                          party: isFolder ? nil : summary,
+                                          bulkCount: group.names.count)
+            }
+            context.entries.insert(entry, at: 0)
+        }
+    }
+
+    /// A folder that entered `error`: StateChanged carries only the word,
+    /// so one bounded status read fetches the text. A failed read still
+    /// logs the fact, with a generic statement — the event happened.
+    private func logFolderErrors(_ context: inout BatchContext, api: SyncthingAPI) async {
+        for (folder, time) in context.errorFolders {
+            let text = (try? await api.folderStatusError(id: folder)) ?? nil
+            context.entries.insert(Entry.daemonEvent(.folderError(text ?? "Folder stopped with an error"),
+                                                     time: time, folderID: folder,
+                                                     folderLabel: folderLabel(for: folder)),
+                                   at: 0)
+        }
+    }
+
     private func logClosure(_ closure: OutboundLedger.FolderClosure, folder: String,
                             party: String, time: Date, into entries: inout [Entry]) {
         for (path, item) in closure.items.reversed() {

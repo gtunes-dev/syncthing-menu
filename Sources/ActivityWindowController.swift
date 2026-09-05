@@ -22,9 +22,13 @@ import SwiftUI
 /// NOT re-centered on every show — the user's placement wins; first open
 /// centers once.
 ///
-/// Visibility is the activity feature's on/off switch: `onVisibilityChange`
-/// tells the owner when the window opens/closes so the event stream runs only
-/// while someone is looking (closed window = zero daemon traffic).
+/// Visibility is one of the feed's two recording inputs: `onVisibilityChange`
+/// tells the owner when the window opens/closes, and under the default
+/// "while the window is open" policy that is what starts and pauses
+/// recording (closed window = zero daemon traffic); under "always" the
+/// window is just a view onto a log that records regardless. The log
+/// survives close either way — Clear (toolbar, ⌘K) is the only way to
+/// empty it.
 final class ActivityWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                                       NSSearchFieldDelegate {
     private var window: NSWindow?
@@ -139,8 +143,9 @@ final class ActivityWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
     }
 
     func windowWillClose(_ notification: Notification) {
-        // The search text is transient view scoping, like the feed's rows:
-        // every open starts fresh (drop-on-close philosophy).
+        // The search text is transient view scoping: every open starts with
+        // the whole log in view (the rows themselves persist — see the
+        // header comment).
         display.searchText = ""
         searchItem?.searchField.stringValue = ""
         onVisibilityChange?(false)
@@ -164,13 +169,14 @@ final class ActivityWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
         static let search = NSToolbarItem.Identifier("Search")
         static let filter = NSToolbarItem.Identifier("Filter")
         static let pin = NSToolbarItem.Identifier("KeepOnTop")
+        static let clear = NSToolbarItem.Identifier("Clear")
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        // The view-scoping pair (search, then the Filter popover), then the
-        // pin — every control acts on the window itself. (The identity
-        // cluster is a titlebar accessory, not an item.)
-        [.flexibleSpace, ItemID.search, ItemID.filter, ItemID.pin]
+        // The view-scoping pair (search, then the Filter popover), the pin,
+        // then Clear — every control acts on the window itself. (The
+        // identity cluster is a titlebar accessory, not an item.)
+        [.flexibleSpace, ItemID.search, ItemID.filter, ItemID.pin, ItemID.clear]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -217,9 +223,23 @@ final class ActivityWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
                                 action: #selector(togglePin))
             pinItem = item
             return item
+        case ItemID.clear:
+            return makeItem(itemIdentifier, symbol: "trash", label: "Clear",
+                            toolTip: "Clear the log (⌘K)",
+                            action: #selector(clearActivityLog(_:)))
         default:
             return nil
         }
+    }
+
+    /// Clear — the toolbar item's action, and ⌘K's: the hidden main menu's
+    /// "Clear Activity" item sends this to the responder chain with no
+    /// target, and the chain reaches a window's DELEGATE, so it lands here
+    /// exactly when the Activity window is key (elsewhere no responder
+    /// answers, the menu item auto-disables, the keystroke is swallowed).
+    @objc private func clearActivityLog(_ sender: Any?) {
+        // AppKit dispatches actions on the main thread; the feed is main-actor.
+        MainActor.assumeIsolated { feed.clear() }
     }
 
     private func makeItem(_ identifier: NSToolbarItem.Identifier, symbol: String,

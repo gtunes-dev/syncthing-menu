@@ -142,6 +142,17 @@ struct SyncthingAPI: Equatable {
         return try JSONDecoder().decode(Response.self, from: data).state
     }
 
+    /// `GET /rest/db/status?folder=` → the folder's error text (nil when
+    /// healthy). The activity feed reads it once when StateChanged reports a
+    /// folder entering `error` — that event carries only the word.
+    func folderStatusError(id: String) async throws -> String? {
+        struct Response: Decodable { let error: String? }
+        let data = try await send("/rest/db/status?folder=\(try Self.encodeQueryValue(id))",
+                                  method: "GET")
+        let error = try JSONDecoder().decode(Response.self, from: data).error ?? ""
+        return error.isEmpty ? nil : error
+    }
+
     /// One path Syncthing couldn't process in a folder, with its error text.
     struct FolderError: Decodable, Equatable {
         let path: String
@@ -363,11 +374,23 @@ struct SyncthingAPI: Equatable {
         /// RemoteDownloadProgress: the paths the remote device is actively
         /// downloading (the keys of its `state` block-count map).
         let downloadingPaths: [String]?
+        /// StateChanged: the folder's previous and new state, and the
+        /// seconds spent in `from`. FolderWatchStateChanged: the previous
+        /// and new watcher error text (each absent when there was none).
+        let from: String?
+        let to: String?
+        let duration: Double?
+        /// The raw `data.id`, whatever it names: a device for
+        /// DeviceConnected/Disconnected (also folded into `device`), a
+        /// FOLDER for FolderPaused/FolderResumed (which say `id` + `label`,
+        /// not `folder`).
+        let dataID: String?
 
         private enum CodingKeys: String, CodingKey { case id, type, time, data }
         private enum DataKeys: String, CodingKey {
             case folder, label, path, item, action, type, modifiedBy, error
             case device, completion, needItems, needDeletes, items, filenames, state
+            case from, to, duration
             // DeviceConnected/DeviceDisconnected carry the device id as `id`
             // while every other device-bearing event says `device` (upstream
             // inconsistency, docs-verified 2026-08-02) — decode both.
@@ -397,12 +420,17 @@ struct SyncthingAPI: Equatable {
                 filenames = try? data.decodeIfPresent([String].self, forKey: .filenames)
                 downloadingPaths = (try? data.decodeIfPresent([String: Int].self, forKey: .state))
                     .map { Array($0.keys) }
+                from = try? data.decodeIfPresent(String.self, forKey: .from)
+                to = try? data.decodeIfPresent(String.self, forKey: .to)
+                duration = try? data.decodeIfPresent(Double.self, forKey: .duration)
+                dataID = try? data.decodeIfPresent(String.self, forKey: .deviceID)
             } else {
                 folder = nil; label = nil; path = nil; action = nil
                 itemKind = nil; modifiedBy = nil; error = nil
                 device = nil; completion = nil; needItems = nil
                 needDeletes = nil; items = nil; filenames = nil
-                downloadingPaths = nil
+                downloadingPaths = nil; from = nil; to = nil; duration = nil
+                dataID = nil
             }
         }
 
@@ -434,12 +462,17 @@ struct SyncthingAPI: Equatable {
     /// entries, FolderCompletion drives delivery confirmation + Devices-panel
     /// counts, RemoteDownloadProgress is the per-item outbound signal,
     /// LocalIndexUpdated is the burst backstop, ConfigSaved cues an identity
-    /// refresh, and the connectivity pair maintains the connected set.
+    /// refresh, the connectivity pair maintains the connected set AND logs
+    /// peer online/offline rows, and the daemon-event types (pause/resume,
+    /// folder state, watcher state) log the folder & device event rows.
     static let activityEventTypes = ["LocalChangeDetected", "RemoteChangeDetected",
                                      "ItemStarted", "ItemFinished",
                                      "FolderCompletion", "RemoteDownloadProgress",
                                      "LocalIndexUpdated", "ConfigSaved",
-                                     "DeviceConnected", "DeviceDisconnected"]
+                                     "DeviceConnected", "DeviceDisconnected",
+                                     "DevicePaused", "DeviceResumed",
+                                     "FolderPaused", "FolderResumed",
+                                     "StateChanged", "FolderWatchStateChanged"]
 
     func activityEvents(since: Int, timeout: Int, limit: Int? = nil) async throws -> [ActivityEvent] {
         var query = "since=\(since)&timeout=\(timeout)&events=\(Self.activityEventTypes.joined(separator: ","))"

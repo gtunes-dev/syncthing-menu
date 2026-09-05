@@ -23,8 +23,20 @@ editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)
                  keyEquivalent: "a")
 let editItem = NSMenuItem()
 editItem.submenu = editMenu
+// ⌘K clears the Activity log. Nil target: the action resolves through the
+// key window's responder chain (which reaches the window's delegate — the
+// Activity window controller), so it's live exactly while that window is
+// key and auto-disabled otherwise. A key equivalent on the toolbar button
+// itself was not relied on (unconfirmed that the window's key-equivalent
+// pass reaches toolbar item views); the menu route is proven here.
+let viewMenu = NSMenu(title: "View")
+viewMenu.addItem(withTitle: "Clear Activity", action: Selector(("clearActivityLog:")),
+                 keyEquivalent: "k")
+let viewItem = NSMenuItem()
+viewItem.submenu = viewMenu
 let mainMenu = NSMenu()
 mainMenu.addItem(editItem)
+mainMenu.addItem(viewItem)
 application.mainMenu = mainMenu
 
 let delegate = AppDelegate()

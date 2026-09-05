@@ -211,6 +211,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
+        // Activity recording: apply the persisted policy BEFORE the session
+        // can connect — under `always` the log then begins with a started
+        // marker, followed by connected (launch is a transition) — and
+        // follow later changes from Settings.
+        activityFeed.setRecordingPolicy(Settings.shared.activity.recording)
+        Settings.shared.activity.$recording
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] policy in self?.activityFeed.setRecordingPolicy(policy) }
+            .store(in: &cancellables)
+
         activate(mode: Settings.shared.daemon.mode)
     }
 
