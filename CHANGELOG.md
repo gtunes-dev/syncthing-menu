@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-09-05
+
 ### Added
 - A "Record activity" setting: keep recording sync activity while the Activity window is closed, or only while it is open (the default).
 - The Activity window keeps its log when closed and reopened.
