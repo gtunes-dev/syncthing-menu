@@ -356,6 +356,12 @@ struct ActivityFeedTests {
         #expect(deliveredCount() == 1)
 
         // Episode 2: the file churns again — its new delivery logs again.
+        // The re-change makes a NEW global version the remote cannot have
+        // yet, so the daemon's availability answer for this path flips to
+        // "nobody" — model that, or episode 1's fire-and-forget check,
+        // landing late under load, would read the fake's static "available"
+        // as episode 2's delivery (the CI flake of 2026-09-05).
+        server.setFileAvailability(folder: "f1", path: "churn.plist", devices: [])
         server.pushEvent(type: "LocalChangeDetected",
                          data: ["folder": "f1", "path": "churn.plist", "action": "modified"])
         try await expectEventually {
