@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-07
+
 ### Added
 - Each folder in the Folders menu has its own submenu: Open in Finder, Rescan, and Pause or Resume.
 - A Devices menu lists your other devices, each with Pause or Resume.
