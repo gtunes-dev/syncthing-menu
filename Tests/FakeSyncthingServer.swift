@@ -253,6 +253,12 @@ final class FakeSyncthingServer {
         pushEvents([(type: type, data: data)])
     }
 
+    /// Simulate a ring overflow: the next pushed event's id skips ahead, so a
+    /// subscriber sees a gap (events it never received).
+    func dropEvents(_ count: Int) {
+        queue.sync { nextEventID += count }
+    }
+
     /// Append several events ATOMICALLY: parked long-polls release once, with
     /// the whole batch — how a real daemon delivers events that accumulated
     /// between polls. Lets tests exercise same-batch behavior (e.g. the
@@ -283,6 +289,11 @@ final class FakeSyncthingServer {
         var path: String
         var headers: [String: String]   // keys lowercased
         var body: Data
+
+        /// The body as a JSON object, nil if absent or not an object.
+        var json: [String: Any]? {
+            try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+        }
     }
 
     private func accept(_ connection: NWConnection) {
@@ -364,8 +375,7 @@ final class FakeSyncthingServer {
             send(["releasesURL": "https://upgrades.syncthing.net/meta.json",
                   "upgradeToPreReleases": false], on: connection)
         case ("PATCH", "/rest/config/options"):
-            if let json = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
-               let hours = json["autoUpgradeIntervalH"] as? Int {
+            if let hours = request.json?["autoUpgradeIntervalH"] as? Int {
                 _recordedAutoUpgradeIntervals.append(hours)
             }
             send([:], on: connection)
@@ -383,6 +393,44 @@ final class FakeSyncthingServer {
                  "devices": (folder.sharedWith ?? _devices.map(\.deviceID))
                      .map { ["deviceID": $0] }] as [String: Any]
             }, on: connection)
+        case ("PATCH", _) where path.hasPrefix("/rest/config/folders/"):
+            // The per-folder partial patch: the real daemon merges the body
+            // into the folder's config and emits ConfigSaved +
+            // FolderPaused/FolderResumed. The fake flips the flag so a
+            // following config read reflects it.
+            let id = String(path.dropFirst("/rest/config/folders/".count))
+                .removingPercentEncoding ?? ""
+            guard let index = _folders.firstIndex(where: { $0.id == id }) else {
+                send(["error": "no such object"], status: 404, on: connection)
+                return
+            }
+            if let paused = request.json?["paused"] as? Bool {
+                _folders[index].paused = paused
+            }
+            send([:], on: connection)
+        case ("POST", "/rest/system/pause"), ("POST", "/rest/system/resume"):
+            // The device pause endpoint: one device by query, or every
+            // remote device without one. Mirrors the real daemon's shape
+            // (verified live: a device-less POST pauses all).
+            let paused = path.hasSuffix("/pause")
+            if let id = query["device"] {
+                guard let index = _devices.firstIndex(where: { $0.deviceID == id }) else {
+                    send(["error": "no such device"], status: 404, on: connection)
+                    return
+                }
+                _devices[index].paused = paused
+            } else {
+                for index in _devices.indices where _devices[index].deviceID != _myID {
+                    _devices[index].paused = paused
+                }
+            }
+            send([:], on: connection)
+        case ("POST", "/rest/db/scan"):
+            if let id = query["folder"], !_folders.contains(where: { $0.id == id }) {
+                send(["error": "no such folder"], status: 404, on: connection)
+                return
+            }
+            send([:], on: connection)
         case ("GET", "/rest/db/status"):
             let folder = _folders.first { $0.id == query["folder"] }
             send(["state": folder?.state ?? "idle", "error": folder?.error ?? ""],

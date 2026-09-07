@@ -30,8 +30,15 @@ struct SyncthingMonitorTests {
         monitor.connect(api: api(for: server))
         try await expectEventually { !snapshots.isEmpty }
 
-        // The only remote device (A) is paused; SELF must not count.
-        #expect(snapshots.first == .init(allDevicesPaused: true, activity: .idle))
+        // The only remote device (A) is paused; SELF must not count. The
+        // lists carry what the menu renders: names (id fallback), paths,
+        // and per-object state.
+        let expected = SyncthingMonitor.Snapshot(
+            activity: .idle,
+            folders: [.init(id: "f1", name: "f1", path: "/tmp", paused: false, attention: false)],
+            devices: [.init(id: "A", name: "A", paused: true)])
+        #expect(snapshots.first == expected)
+        #expect(snapshots.first?.allDevicesPaused == true)
     }
 
     /// StateChanged events flip folder activity — including back to idle.
@@ -84,9 +91,134 @@ struct SyncthingMonitorTests {
 
         server.pushEvent(type: "DevicePaused", data: ["device": "A"])
         try await expectEventually { snapshots.last?.allDevicesPaused == true }
+        #expect(snapshots.last?.devices.map(\.paused) == [true])
 
         server.pushEvent(type: "DeviceResumed", data: ["device": "A"])
         try await expectEventually { snapshots.last?.allDevicesPaused == false }
+        #expect(snapshots.last?.devices.map(\.paused) == [false])
+    }
+
+    /// A folder pause lands the moment the daemon reports it — the event
+    /// flips the row before the ConfigSaved reseed that follows — and a
+    /// paused folder's activity events stop counting at once. The event
+    /// names the folder as `id` (an upstream inconsistency the decoder
+    /// absorbs). Unknown ids are ignored.
+    @Test func folderPauseEventsFlipInPlace() async throws {
+        let server = FakeSyncthingServer()
+        try server.start()
+        defer { server.stop() }
+        server.devices = [.init(deviceID: "SELF", paused: false)]
+        server.folders = [.init(id: "f1", label: "Docs"), .init(id: "f2", label: "Photos")]
+
+        let monitor = SyncthingMonitor()
+        defer { monitor.disconnect() }
+        var snapshots: [SyncthingMonitor.Snapshot] = []
+        monitor.onChange = { snapshots.append($0) }
+
+        monitor.connect(api: api(for: server))
+        try await expectEventually { !snapshots.isEmpty }
+        #expect(snapshots.last?.folders.map(\.paused) == [false, false])
+
+        server.pushEvent(type: "FolderPaused", data: ["id": "f1", "label": "Docs"])
+        try await expectEventually { snapshots.last?.folders.map(\.paused) == [true, false] }
+        #expect(!server.requestedPaths.dropFirst(6).contains { $0.hasPrefix("/rest/config") })
+
+        // The paused folder's syncing must not count; f2's scanning (last in
+        // the batch, so the wait is for the whole batch) is what shows.
+        server.pushEvents([(type: "StateChanged", data: ["folder": "f1", "to": "syncing"]),
+                           (type: "FolderResumed", data: ["id": "ghost", "label": ""]),
+                           (type: "StateChanged", data: ["folder": "f2", "to": "scanning"])])
+        try await expectEventually { snapshots.last?.activity == .scanning }
+        #expect(snapshots.last?.folders.map(\.paused) == [true, false])
+
+        server.pushEvent(type: "FolderResumed", data: ["id": "f1", "label": "Docs"])
+        try await expectEventually { snapshots.last?.folders.map(\.paused) == [false, false] }
+    }
+
+    /// A ConfigSaved reseed re-reads the lists but reads per-folder state
+    /// only for folders that just started running: a folder that was
+    /// already running keeps its event-maintained state (here: scanning,
+    /// which a full re-read would have dropped to the daemon's idle) and
+    /// costs no request; an unpaused folder is read once. Every menu
+    /// Pause/Resume click is a config save, so this is what a click costs.
+    @Test func configSavedReadsOnlyFoldersThatStartedRunning() async throws {
+        let server = FakeSyncthingServer()
+        try server.start()
+        defer { server.stop() }
+        server.devices = [.init(deviceID: "SELF", paused: false)]
+        server.folders = [.init(id: "f1"), .init(id: "f2", paused: true)]
+
+        let monitor = SyncthingMonitor()
+        defer { monitor.disconnect() }
+        var snapshots: [SyncthingMonitor.Snapshot] = []
+        monitor.onChange = { snapshots.append($0) }
+
+        monitor.connect(api: api(for: server))
+        try await expectEventually { !snapshots.isEmpty }
+        let stateReads = { server.requestedPaths.filter { $0.hasPrefix("/rest/db/status") } }
+        #expect(stateReads() == ["/rest/db/status?folder=f1"])
+
+        server.pushEvent(type: "StateChanged", data: ["folder": "f1", "to": "scanning"])
+        try await expectEventually { snapshots.last?.activity == .scanning }
+
+        // Unpause f2 by config: f2 is read once; f1 is not re-read and keeps
+        // scanning (the fake would report it idle).
+        server.folders = [.init(id: "f1"), .init(id: "f2")]
+        server.pushEvent(type: "ConfigSaved")
+        try await expectEventually { snapshots.last?.folders.map(\.paused) == [false, false] }
+        #expect(stateReads() == ["/rest/db/status?folder=f1", "/rest/db/status?folder=f2"])
+        #expect(snapshots.last?.activity == .scanning)
+
+        // A config save that changes nothing about which folders run (a
+        // relabel) reads no per-folder state at all.
+        server.folders = [.init(id: "f1", label: "Renamed"), .init(id: "f2")]
+        server.pushEvent(type: "ConfigSaved")
+        try await expectEventually { snapshots.last?.folders.first?.name == "Renamed" }
+        #expect(stateReads().count == 2)
+
+        // "Started running" is judged against the last SEED, not the live
+        // record: a FolderResumed event landing before its ConfigSaved has
+        // already flipped the record, and the folder still gets its read.
+        server.pushEvent(type: "FolderPaused", data: ["id": "f2", "label": ""])
+        try await expectEventually { snapshots.last?.folders.map(\.paused) == [false, true] }
+        server.folders = [.init(id: "f1", label: "Renamed"), .init(id: "f2", paused: true)]
+        server.pushEvent(type: "ConfigSaved")
+        try await expectEventually { !server.requestedPaths.filter { $0 == "/rest/config/folders" }.dropFirst(3).isEmpty }
+        server.folders = [.init(id: "f1", label: "Renamed"), .init(id: "f2", state: "scanning")]
+        server.pushEvents([(type: "FolderResumed", data: ["id": "f2", "label": ""]),
+                           (type: "ConfigSaved", data: [:])])
+        try await expectEventually { stateReads().count == 3 }
+        #expect(stateReads().last == "/rest/db/status?folder=f2")
+    }
+
+    /// A ring-overflow gap (events lost between polls) triggers a FULL
+    /// reseed: a flag a lost event would have cleared can't stay stuck. The
+    /// scanning flag set by event is corrected to the daemon's idle.
+    @Test func gapInTheStreamReseeds() async throws {
+        let server = FakeSyncthingServer()
+        try server.start()
+        defer { server.stop() }
+        server.devices = [.init(deviceID: "SELF", paused: false)]
+        server.folders = [.init(id: "f1")]
+
+        let monitor = SyncthingMonitor()
+        defer { monitor.disconnect() }
+        var snapshots: [SyncthingMonitor.Snapshot] = []
+        monitor.onChange = { snapshots.append($0) }
+
+        monitor.connect(api: api(for: server))
+        try await expectEventually { !snapshots.isEmpty }
+        let folderReads = { server.requestedPaths.filter { $0 == "/rest/config/folders" }.count }
+        #expect(folderReads() == 1)
+
+        server.pushEvent(type: "StateChanged", data: ["folder": "f1", "to": "scanning"])
+        try await expectEventually { snapshots.last?.activity == .scanning }
+
+        // The "idle" that would have cleared it is lost in the gap.
+        server.dropEvents(5)
+        server.pushEvent(type: "DeviceConnected", data: ["id": "nobody"])
+        try await expectEventually { snapshots.last?.activity == .idle }
+        #expect(folderReads() == 2)
     }
 
     /// ConfigSaved rebuilds both aggregates from scratch (devices/folders may have
@@ -113,8 +245,10 @@ struct SyncthingMonitorTests {
     }
 
     /// Seeding reads each folder's current errors: a permission failure present
-    /// at connect is surfaced immediately (by display name), while ordinary
-    /// errors (disk full, …) never raise the FDA signal.
+    /// at connect is surfaced immediately (by display name for Settings, by id
+    /// for anything that must single out one folder — labels may be
+    /// duplicated), while ordinary errors (disk full, …) never raise the FDA
+    /// signal.
     @Test func seedFlagsPermissionErrorsOnly() async throws {
         let server = FakeSyncthingServer()
         try server.start()
@@ -124,7 +258,7 @@ struct SyncthingMonitorTests {
                   errors: [(path: "/Users/x/Documents/a", error: "scanning: open: operation not permitted")]),
             .init(id: "f2", label: "Cabinet",
                   errors: [(path: "/Users/x/Cabinet/b", error: "no space left on device")]),
-            .init(id: "f3", label: "Photos"),
+            .init(id: "f3", label: "Documents"),   // a duplicate label, healthy
         ]
 
         let monitor = SyncthingMonitor()
@@ -135,6 +269,7 @@ struct SyncthingMonitorTests {
         monitor.connect(api: api(for: server))
         try await expectEventually { !snapshots.isEmpty }
         #expect(snapshots.first?.permissionErrorFolders == ["Documents"])
+        #expect(snapshots.first?.folders.filter(\.attention).map(\.id) == ["f1"])
     }
 
     /// A FolderErrors event carries the folder's CURRENT error list: permission
@@ -225,6 +360,60 @@ struct SyncthingMonitorTests {
             "completion": 100, "needItems": 0, "needDeletes": 0,
         ])
         try await expectEventually { snapshots.last?.activity == .idle }
+    }
+
+    /// A folder that stops running ends its outbound syncing at once: a
+    /// pause (the event, before any reseed) and a removal (a ConfigSaved
+    /// reseed) both drop the peer's catch-up entry — no completion report
+    /// would ever arrive to clear it. A reseed keeps entries for folders
+    /// that still run.
+    @Test func pausingOrRemovingABehindFolderEndsOutbound() async throws {
+        let server = FakeSyncthingServer()
+        try server.start()
+        defer { server.stop() }
+        server.devices = [.init(deviceID: "SELF", paused: false),
+                          .init(deviceID: "A", paused: false, connected: true)]
+        server.folders = [.init(id: "f1"), .init(id: "f2")]
+
+        let monitor = SyncthingMonitor()
+        defer { monitor.disconnect() }
+        var snapshots: [SyncthingMonitor.Snapshot] = []
+        monitor.onChange = { snapshots.append($0) }
+
+        monitor.connect(api: api(for: server))
+        try await expectEventually { !snapshots.isEmpty }
+
+        let behind: [String: Any] = ["completion": 50.0, "needItems": 1, "needDeletes": 0]
+        server.pushEvent(type: "FolderCompletion", data: behind.merging(["folder": "f1", "device": "A"]) { $1 })
+        try await expectEventually { snapshots.last?.activity == .syncing }
+
+        // Pause f1: its catch-up entry goes with it.
+        server.pushEvent(type: "FolderPaused", data: ["id": "f1", "label": ""])
+        try await expectEventually { snapshots.last?.activity == .idle }
+        #expect(snapshots.last?.folders.map(\.paused) == [true, false])
+
+        // Behind on f2 too; a reseed that keeps f2 keeps the entry…
+        server.pushEvent(type: "FolderCompletion", data: behind.merging(["folder": "f2", "device": "A"]) { $1 })
+        try await expectEventually { snapshots.last?.activity == .syncing }
+        server.folders = [.init(id: "f1", paused: true), .init(id: "f2")]
+        server.pushEvent(type: "ConfigSaved")
+        try await expectEventually { snapshots.last?.folders.map(\.paused) == [true, false] }
+        #expect(snapshots.last?.activity == .syncing)
+
+        // …a reseed that un-shares A from f2 (f2 keeps running) drops it —
+        // the daemon reports completion only to current sharers…
+        server.folders = [.init(id: "f1", paused: true), .init(id: "f2", sharedWith: ["SELF"])]
+        server.pushEvent(type: "ConfigSaved")
+        try await expectEventually { snapshots.last?.activity == .idle }
+        #expect(snapshots.last?.folders.map(\.id) == ["f1", "f2"])
+
+        // …and a reseed that removed f2 drops it.
+        server.pushEvent(type: "FolderCompletion", data: behind.merging(["folder": "f2", "device": "A"]) { $1 })
+        try await expectEventually { snapshots.last?.activity == .syncing }
+        server.folders = [.init(id: "f1", paused: true)]
+        server.pushEvent(type: "ConfigSaved")
+        try await expectEventually { snapshots.last?.activity == .idle }
+        #expect(snapshots.last?.folders.map(\.id) == ["f1"])
     }
 
     /// Deletes-only outbound changes: completion can report 100 while
@@ -372,7 +561,13 @@ struct SyncthingMonitorTests {
 
         // Seed succeeded despite the paused folder's 404; its scripted
         // "syncing" state and permission error are ignored — not running.
-        #expect(snapshots.first == .init(allDevicesPaused: false, activity: .idle))
+        // It IS published as paused, so the menu can mark the Folders list.
+        let expected = SyncthingMonitor.Snapshot(
+            activity: .idle,
+            folders: [.init(id: "f1", name: "Paused", path: "/tmp", paused: true, attention: false),
+                      .init(id: "f2", name: "Active", path: "/tmp", paused: false, attention: false)],
+            devices: [.init(id: "A", name: "A", paused: false)])
+        #expect(snapshots.first == expected)
         #expect(suspected == 0)
     }
 

@@ -9,13 +9,15 @@ import Combine
 /// row, icon, tooltip, verb visibility).
 ///
 /// The menu groups this app's items (About, Settings) above the Syncthing items
-/// (status, web UI, folders) — matching the Settings and About windows.
+/// (status, web UI, folders, devices) — matching the Settings and About windows.
+///
+/// The Folders and Devices lists render from the monitor's `Snapshot` — the
+/// same one the status model is fed from — pushed live by the owner. Nothing
+/// is fetched on menu open: rows, list marks, and the bulk verbs' state all
+/// come from one value, so they can't disagree, and they update in place
+/// while the menu is showing (the snapshot changes by daemon event).
 final class StatusItemController: NSObject {
-    /// One synced folder shown in the Folders submenu.
-    struct FolderEntry {
-        let name: String
-        let path: String
-    }
+    typealias Snapshot = SyncthingMonitor.Snapshot
 
     /// A pending update on one channel, as the menu shows it. `enabled` is
     /// false while the other channel is mid-install (installs are serialized
@@ -27,23 +29,27 @@ final class StatusItemController: NSObject {
     }
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    private let menu = NSMenu()
-    private let foldersMenu = NSMenu()
+    // The menus are internal (not private) so tests can read what rendered.
+    let menu = NSMenu()
+    let foldersMenu = NSMenu()
+    let devicesMenu = NSMenu()
     private let status: SyncthingStatusModel
     private var statusSink: AnyCancellable?
     private let onOpenSettings: () -> Void
     private let onAbout: () -> Void
 
-    /// Called just before the menu opens, so the owner can refresh live data
-    /// (the folder list, device pause state) before it's shown.
-    var onMenuWillOpen: (() -> Void)?
-
     /// Daemon operations, wired by the owner. The controller only reflects
-    /// state and forwards intent.
+    /// state and forwards intent; every verb's result comes back through the
+    /// snapshot, nothing is flipped locally.
     var onStartSyncthing: (() -> Void)?
     var onRescanAll: (() -> Void)?
     /// `true` = pause all devices, `false` = resume all.
     var onPauseToggle: ((_ pause: Bool) -> Void)?
+    /// Per-folder verbs from a folder's submenu.
+    var onRescanFolder: ((_ id: String) -> Void)?
+    var onSetFolderPaused: ((_ id: String, _ paused: Bool) -> Void)?
+    /// The per-device verb from a device's submenu.
+    var onSetDevicePaused: ((_ id: String, _ paused: Bool) -> Void)?
     /// Apply the pending update (the click is the consent — majors included).
     var onUpdateApp: (() -> Void)?
     var onUpdateSyncthing: (() -> Void)?
@@ -60,6 +66,7 @@ final class StatusItemController: NSObject {
     private var webUIItem: NSMenuItem?
     private var activityItem: NSMenuItem?
     private var foldersItem: NSMenuItem?
+    private var devicesItem: NSMenuItem?
     private var rescanItem: NSMenuItem?
     private var pauseToggleItem: NSMenuItem?
     private var appUpdate: PendingUpdate?
@@ -68,6 +75,14 @@ final class StatusItemController: NSObject {
     private var webUIURL: String?
 
     private var updateAvailable = false
+    /// The last snapshot rendered. `update(snapshot:)` re-renders a list
+    /// only when THAT list changed (activity flips every few seconds on a
+    /// busy daemon and the lists never render it).
+    private var snapshot = Snapshot()
+    /// The rows currently in each list (or its placeholder) — removed
+    /// exactly on re-render, so the header above them is never counted.
+    private var folderRows: [NSMenuItem] = []
+    private var deviceRows: [NSMenuItem] = []
 
     init(status: SyncthingStatusModel,
          onOpenSettings: @escaping () -> Void, onAbout: @escaping () -> Void) {
@@ -76,7 +91,7 @@ final class StatusItemController: NSObject {
         self.onAbout = onAbout
         super.init()
         buildMenu()
-        menu.delegate = self
+        render()
         statusItem.menu = menu
         // objectWillChange (not $phase): a smoothing drop changes `display`
         // without a phase change. receive-on-main defers one tick so the
@@ -91,12 +106,13 @@ final class StatusItemController: NSObject {
     // MARK: - Live state
 
     /// Render the model's current state into this surface: status row, verb
-    /// visibility, Pause⇄Resume toggle label, Settings badge, and icon. Runs
-    /// on every phase change (and once at init), whether the change came from
-    /// the process push or the monitor's event stream — so the menu stays
-    /// current without being opened.
+    /// visibility, Settings badge, and icon. Runs on every phase change (and
+    /// once at init), whether the change came from the process push or the
+    /// monitor's event stream — so the menu stays current without being
+    /// opened. The lists render separately, from the snapshot
+    /// (`update(snapshot:)`).
     ///
-    /// The daemon verbs (Web UI, Folders, Rescan, Pause) are HIDDEN — not
+    /// The daemon verbs (Web UI, Folders, Devices) are HIDDEN — not
     /// dimmed — when the daemon isn't running: a column of disabled commands
     /// is noise. In their place the stopped/failed states show a single
     /// recovery action, Start Syncthing.
@@ -120,7 +136,6 @@ final class StatusItemController: NSObject {
             case .selfManaged: setDaemonVerbs(visible: false, canStart: false)
             }
         }
-        pauseToggleItem?.title = status.isPaused ? "Resume All Devices" : "Pause All Devices"
         refreshSettingsBadge()
         refreshIcon()
     }
@@ -129,13 +144,19 @@ final class StatusItemController: NSObject {
     /// running / orange transitional-or-needs-user / red failed / neutral
     /// stopped. Color is never the sole carrier — the detail text states the
     /// same fact in words.
+    /// The dot reports HEALTH; the text beside it reports state. Green =
+    /// healthy, orange = degraded or in transition, red = failed, grey = off.
+    /// All Paused is a healthy state the user chose (the daemon is up and
+    /// still scanning locally), so it's green: the word, the ‖ icon, and the
+    /// marks already say "not syncing" — orange would recode a choice as a
+    /// warning, and grey would misfile it with "Not running".
     private static func dotColor(for display: SyncthingStatusModel.DisplayState) -> NSColor {
         switch display {
         case .notRunning, .notConfigured: .tertiaryLabelColor
         case .starting, .updating, .connecting, .unreachable: .systemOrange
         case .failed, .keyRejected: .systemRed
-        case .attention, .paused: .systemOrange
-        case .syncing, .scanning, .running: .systemGreen
+        case .attention: .systemOrange
+        case .paused, .syncing, .scanning, .running: .systemGreen
         }
     }
 
@@ -147,7 +168,7 @@ final class StatusItemController: NSObject {
     }
 
     private func setDaemonVerbs(visible: Bool, canStart: Bool) {
-        for item in [webUIItem, foldersItem, rescanItem, pauseToggleItem] {
+        for item in [webUIItem, foldersItem, devicesItem] {
             item?.isHidden = !visible
         }
         startItem?.isHidden = !canStart
@@ -174,19 +195,59 @@ final class StatusItemController: NSObject {
         }
     }
 
+    /// The owner pushes every monitor snapshot (and the empty one at
+    /// teardown). Only a list that changed is re-rendered; an unchanged one
+    /// is untouched AppKit.
+    func update(snapshot: Snapshot) {
+        let previous = self.snapshot
+        self.snapshot = snapshot
+        if snapshot.folders != previous.folders { renderFolders() }
+        if snapshot.devices != previous.devices { renderDevices() }
+    }
+
+    /// Initial render, from the empty snapshot: placeholders + dimmed bulk verbs.
+    private func render() {
+        renderFolders()
+        renderDevices()
+    }
+
+    /// The mark for one object — or for a list, as the mark of its rows —
+    /// ONE rule everywhere: the caution mark while blocked on permissions
+    /// (the state that needs the user) outranks the pause mark; a healthy
+    /// running object gets none — ink only where it carries information.
+    /// Paused and attention are the only marked states, deliberately: both
+    /// are stable and actionable; scanning/syncing belong to the icon.
+    private static func mark(attention: Bool = false, paused: Bool) -> NSImage? {
+        attention ? attentionBadge : paused ? pausedBadge : nil
+    }
+
     /// The Settings… item's image before we overlaid the caution badge —
     /// the system-provided gear on macOS 26+, nil on older systems.
     private var defaultSettingsImage: NSImage?
 
     /// The same caution mark the Settings FDA section shows (orange
-    /// exclamationmark.triangle.fill), rasterized into a REAL bitmap: the
-    /// menu renderer doesn't draw color-configured symbol images (verified on
-    /// macOS 27), and a handler-backed NSImage (deferred drawing) gets its
-    /// icon column reserved a frame before its pixels exist — a visible
-    /// "inset but empty" beat. A bitmap-backed image draws atomically.
-    private static let attentionBadge: NSImage = {
-        guard let symbol = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
-                                   accessibilityDescription: nil)?
+    /// exclamationmark.triangle.fill). Also marks a folder row that is
+    /// blocked on permissions.
+    private static let attentionBadge: NSImage = rasterize(
+        symbol: "exclamationmark.triangle.fill", tint: .systemOrange,
+        accessibilityDescription: "Needs attention")
+
+    /// The paused mark on a folder row. A TEMPLATE image: the menu draws its
+    /// alpha in the label color, so it follows dark mode and inverts on the
+    /// highlighted row like the title does.
+    private static let pausedBadge: NSImage = rasterize(
+        symbol: "pause.fill", tint: nil, accessibilityDescription: "Paused")
+
+    /// A symbol rasterized into a REAL bitmap: the menu renderer doesn't draw
+    /// color-configured symbol images (verified on macOS 27), and a
+    /// handler-backed NSImage (deferred drawing) gets its icon column
+    /// reserved a frame before its pixels exist — a visible "inset but empty"
+    /// beat. A bitmap-backed image draws atomically. `tint: nil` yields a
+    /// template image (the alpha mask alone is used, so the fill color is
+    /// immaterial).
+    private static func rasterize(symbol name: String, tint: NSColor?,
+                                  accessibilityDescription: String) -> NSImage {
+        guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .regular)) else {
             return NSImage()
         }
@@ -206,31 +267,123 @@ final class StatusItemController: NSObject {
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         let rect = NSRect(origin: .zero, size: size)
         symbol.draw(in: rect)
-        NSColor.systemOrange.setFill()
+        (tint ?? .black).setFill()
         rect.fill(using: .sourceAtop)   // tint the glyph, keep its alpha
         NSGraphicsContext.restoreGraphicsState()
         let image = NSImage(size: size)
         image.addRepresentation(rep)
-        image.accessibilityDescription = "Needs attention"
+        image.isTemplate = tint == nil
+        image.accessibilityDescription = accessibilityDescription
         return image
-    }()
+    }
 
-    /// Replace the Folders submenu contents. Empty → a single, non-selectable
-    /// "No Folders" item.
-    func update(folders: [FolderEntry]) {
-        foldersMenu.removeAllItems()
-        guard !folders.isEmpty else {
-            let none = foldersMenu.addItem(withTitle: "No Folders", action: nil, keyEquivalent: "")
+    /// Both lists share one shape — the list's daemon-backed bulk verb leads
+    /// (built once in `buildMenu`; the shape of Apple's Wi-Fi and Bluetooth
+    /// menus: the global verb is the nearest target as the submenu opens),
+    /// then a separator, then the rows: object, then verb.
+    ///
+    /// Folders: Rescan All (the folder-less scan; dimmed with no folders),
+    /// then a row per folder — mark + name — opening its verbs. Empty → a
+    /// single, non-selectable "No Folders".
+    private func renderFolders() {
+        let folders = snapshot.folders
+        rescanItem?.isEnabled = !folders.isEmpty
+        folderRows = reconcile(rows: folderRows, in: foldersMenu, with: folders,
+                               id: \.id, placeholder: "No Folders", configure: configureFolderRow)
+        foldersItem?.image = Self.mark(attention: snapshot.folderAttention,
+                                       paused: snapshot.anyFolderPaused)
+    }
+
+    /// Devices: Pause All ⇄ Resume All (the daemon's all-devices pause; the
+    /// title follows `allDevicesPaused` — scoped by its list the title drops
+    /// the noun, as Edit's "Select All" does; opposites swap, a checkmark is
+    /// for toggles; dimmed with no devices), then a row per remote device —
+    /// mark + name — opening its verbs. Empty → "No Devices".
+    private func renderDevices() {
+        let devices = snapshot.devices
+        pauseToggleItem?.title = snapshot.allDevicesPaused ? "Resume All" : "Pause All"
+        pauseToggleItem?.isEnabled = !devices.isEmpty
+        deviceRows = reconcile(rows: deviceRows, in: devicesMenu, with: devices,
+                               id: \.id, placeholder: "No Devices", configure: configureDeviceRow)
+        devicesItem?.image = Self.mark(paused: snapshot.anyDevicePaused)
+    }
+
+    /// Bring a list's rows to `objects`. When the id sequence is unchanged
+    /// (the common case: a pause flip, a rename) every row is updated IN
+    /// PLACE — title, mark, verbs — so a submenu open under the pointer
+    /// survives the update; only an added/removed/reordered object replaces
+    /// the rows. Rows carry their object's id as `representedObject`; the
+    /// placeholder carries none, so it always gets replaced.
+    private func reconcile<T>(rows: [NSMenuItem], in menu: NSMenu, with objects: [T],
+                              id: (T) -> String, placeholder: String,
+                              configure: (NSMenuItem, T) -> Void) -> [NSMenuItem] {
+        if !objects.isEmpty, rows.map({ $0.representedObject as? String }) == objects.map(id) {
+            for (row, object) in zip(rows, objects) { configure(row, object) }
+            return rows
+        }
+        for row in rows { menu.removeItem(row) }
+        guard !objects.isEmpty else {
+            let none = NSMenuItem(title: placeholder, action: nil, keyEquivalent: "")
             none.isEnabled = false
-            return
+            menu.addItem(none)
+            return [none]
         }
-        for folder in folders {
-            let item = foldersMenu.addItem(withTitle: folder.name,
-                                           action: #selector(openFolder(_:)),
-                                           keyEquivalent: "")
-            item.target = self
-            item.representedObject = folder.path
+        return objects.map { object in
+            let row = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            row.representedObject = id(object)
+            configure(row, object)
+            menu.addItem(row)
+            return row
         }
+    }
+
+    /// One folder row: mark + name, and its verbs — Open in Finder · Rescan ·
+    /// — · Pause ⇄ Resume. Open in Finder leads: the most frequent verb at
+    /// the default position. Rescan is dimmed (not hidden — the submenu keeps
+    /// one shape) while the folder is paused: a paused folder isn't running,
+    /// so it can't scan (the daemon errors). Pause/Resume is a swapping
+    /// title, matching Pause All ⇄ Resume All one level up. Every verb
+    /// carries the whole folder as its represented object, so a mis-wired
+    /// selector fails its cast instead of, say, opening Finder on an id.
+    private func configureFolderRow(_ row: NSMenuItem, _ folder: Snapshot.Folder) {
+        row.title = folder.name
+        row.image = Self.mark(attention: folder.attention, paused: folder.paused)
+        let verbs = row.submenu ?? Self.verbMenu(
+            verb("Open in Finder", #selector(openFolder(_:))),
+            verb("Rescan", #selector(rescanFolder(_:))),
+            .separator(),
+            verb("Pause", #selector(toggleFolderPaused(_:))))
+        row.submenu = verbs
+        for item in verbs.items where !item.isSeparatorItem { item.representedObject = folder }
+        verbs.item(for: #selector(rescanFolder(_:)))?.isEnabled = !folder.paused
+        verbs.item(for: #selector(toggleFolderPaused(_:)))?.title = folder.paused ? "Resume" : "Pause"
+    }
+
+    /// One device row: mark + name, and its one verb — Pause ⇄ Resume, the
+    /// only per-device verb the daemon has. A submenu (not a direct toggle
+    /// on the row) keeps the two lists in one grammar.
+    private func configureDeviceRow(_ row: NSMenuItem, _ device: Snapshot.Device) {
+        row.title = device.name
+        row.image = Self.mark(paused: device.paused)
+        let verbs = row.submenu ?? Self.verbMenu(verb("Pause", #selector(toggleDevicePaused(_:))))
+        row.submenu = verbs
+        let pause = verbs.item(for: #selector(toggleDevicePaused(_:)))
+        pause?.representedObject = device
+        pause?.title = device.paused ? "Resume" : "Pause"
+    }
+
+    private func verb(_ title: String, _ action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        return item
+    }
+
+    /// A verb submenu: enablement is ours (a dimmed Rescan must stay dimmed).
+    private static func verbMenu(_ items: NSMenuItem...) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for item in items { menu.addItem(item) }
+        return menu
     }
 
     /// Reflect pending updates: a direct action item per channel ("Update
@@ -316,6 +469,7 @@ final class StatusItemController: NSObject {
         // We manage item enablement ourselves.
         menu.autoenablesItems = false
         foldersMenu.autoenablesItems = false
+        devicesMenu.autoenablesItems = false
 
         // ── Syncthing Menu (this app) ─────────────────────────────────────────
         let aboutItem = menu.addItem(withTitle: "About Syncthing Menu",
@@ -384,20 +538,26 @@ final class StatusItemController: NSObject {
         webUI.target = self
         webUIItem = webUI
 
+        // The two lists: each leads with its one daemon-backed bulk verb (a
+        // stable item), then a separator; the rows below are rendered from
+        // the snapshot (`render`).
         let folders = menu.addItem(withTitle: "Folders", action: nil, keyEquivalent: "")
         folders.submenu = foldersMenu
         foldersItem = folders
-        update(folders: [])        // initial "No Folders" state
-
-        let rescan = menu.addItem(withTitle: "Rescan All",
-                                  action: #selector(rescanAll), keyEquivalent: "")
+        let rescan = foldersMenu.addItem(withTitle: "Rescan All",
+                                         action: #selector(rescanAll), keyEquivalent: "")
         rescan.target = self
         rescanItem = rescan
+        foldersMenu.addItem(.separator())
 
-        let pauseToggle = menu.addItem(withTitle: "Pause All Devices",
-                                       action: #selector(togglePauseAll), keyEquivalent: "")
+        let devices = menu.addItem(withTitle: "Devices", action: nil, keyEquivalent: "")
+        devices.submenu = devicesMenu
+        devicesItem = devices
+        let pauseToggle = devicesMenu.addItem(withTitle: "", action: #selector(togglePauseAll),
+                                              keyEquivalent: "")
         pauseToggle.target = self
         pauseToggleItem = pauseToggle
+        devicesMenu.addItem(.separator())
 
         // Initial state: daemon not running → verbs hidden, Start showing.
         setDaemonVerbs(visible: false, canStart: true)
@@ -446,13 +606,28 @@ final class StatusItemController: NSObject {
     }
 
     @objc private func togglePauseAll() {
-        onPauseToggle?(!status.isPaused)
+        onPauseToggle?(!snapshot.allDevicesPaused)
     }
 
     @objc private func openFolder(_ sender: NSMenuItem) {
-        guard let path = sender.representedObject as? String else { return }
-        let expanded = (path as NSString).expandingTildeInPath
+        guard let folder = sender.representedObject as? Snapshot.Folder else { return }
+        let expanded = (folder.path as NSString).expandingTildeInPath
         NSWorkspace.shared.open(URL(fileURLWithPath: expanded))
+    }
+
+    @objc private func rescanFolder(_ sender: NSMenuItem) {
+        guard let folder = sender.representedObject as? Snapshot.Folder else { return }
+        onRescanFolder?(folder.id)
+    }
+
+    @objc private func toggleFolderPaused(_ sender: NSMenuItem) {
+        guard let folder = sender.representedObject as? Snapshot.Folder else { return }
+        onSetFolderPaused?(folder.id, !folder.paused)
+    }
+
+    @objc private func toggleDevicePaused(_ sender: NSMenuItem) {
+        guard let device = sender.representedObject as? Snapshot.Device else { return }
+        onSetDevicePaused?(device.id, !device.paused)
     }
 
     @objc private func quit() {
@@ -461,11 +636,6 @@ final class StatusItemController: NSObject {
     }
 }
 
-extension StatusItemController: NSMenuDelegate {
-    func menuWillOpen(_ menu: NSMenu) {
-        onMenuWillOpen?()
-    }
-}
 
 /// Full-contrast, non-interactive status row for the dropdown.
 ///
@@ -523,4 +693,12 @@ private final class StatusRowView: NSView {
     // The row is informational — swallow clicks so it can never act.
     override func mouseDown(with event: NSEvent) {}
     override func mouseUp(with event: NSEvent) {}
+}
+
+private extension NSMenu {
+    /// The item wired to `action` — how a row's verbs are found for an
+    /// in-place update (never by index).
+    func item(for action: Selector) -> NSMenuItem? {
+        items.first { $0.action == action }
+    }
 }

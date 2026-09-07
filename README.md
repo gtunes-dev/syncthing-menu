@@ -66,11 +66,16 @@ update.
 Click the menu-bar icon for:
 
 - **Live status** — a colored dot and a one-line state: running, syncing,
-  paused, starting, stopped, failed, or needing attention (a folder Syncthing
-  can't access).
+  all paused (every device paused), starting, stopped, failed, or needing
+  attention (a folder Syncthing can't access).
 - **Open Syncthing** — Syncthing's full web interface in your browser.
-- **Folders** — your sync folders; click one to open it in Finder.
-- **Rescan All** and **Pause All Devices ⇄ Resume All Devices**.
+- **Folders** — Rescan All, then your sync folders, each with its own submenu:
+  Open in Finder, Rescan, and Pause ⇄ Resume.
+- **Devices** — Pause All ⇄ Resume All, then your other devices, each with a
+  submenu: Pause ⇄ Resume.
+- A pause mark sits beside any paused folder or device, and beside the Folders
+  or Devices item itself while anything inside is paused; a caution mark shows
+  a folder Syncthing can't access.
 - **Start Syncthing** — appears when the daemon is stopped or has failed.
 - **Update … to X** — a direct install action per channel, appearing only while
   that update is pending.
@@ -82,9 +87,9 @@ Click the menu-bar icon for:
 - **Quit** — stops the daemon it manages, then exits.
 
 The menu-bar icon itself reflects state: a quiet monochrome mark when all is
-well, distinct marks while syncing or paused, an alert mark when the daemon
-can't run or a folder needs attention, and a badged variant when an update is
-available. Its tooltip always carries the full one-line story.
+well, distinct marks while syncing or with every device paused, an alert mark
+when the daemon can't run or a folder needs attention, and a badged variant when
+an update is available. Its tooltip always carries the full one-line story.
 
 ## Activity
 

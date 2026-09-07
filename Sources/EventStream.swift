@@ -52,6 +52,15 @@ final class EventStream<E: StreamedEvent> {
     /// failure/escalation path without real time passing.
     var retrySleep: (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) }
 
+    /// Reseed after a ring-overflow gap (events lost between polls). For a
+    /// consumer whose state is a projection of the daemon's (the monitor:
+    /// which folders scan, which peers are behind) a lost event can leave a
+    /// flag stuck with nothing to clear it — a fresh read is the only
+    /// self-heal. Off by default: the activity feed recovers a gap by name
+    /// (its index backstop) and treats omission as honest, so a reseed there
+    /// would only reset its per-tick state for nothing.
+    var reseedAfterGap = false
+
     private var task: Task<Void, Never>?
 
     /// - Parameters:
@@ -108,14 +117,18 @@ final class EventStream<E: StreamedEvent> {
                 let events = try await fetch(since, Self.pollTimeout, nil)
                 guard !Task.isCancelled else { return }
                 consecutiveFailures = 0
+                var gapped = false
                 if let first = events.first, since > 0, first.id > since + 1 {
                     // Ring overflow: the daemon buffers 1000 events per
                     // subscription and we fell behind. Events between are
-                    // lost; the stream continues from here.
-                    Log.monitor.log("\(self.label, privacy: .public) stream missed \(first.id - since - 1) events")
+                    // lost; the stream continues from here — after a fresh
+                    // read of the state, when the consumer asks for one.
+                    gapped = true
+                    Log.monitor.log("\(self.label, privacy: .public) stream missed \(first.id - since - 1) events\(self.reseedAfterGap ? " — reseeding" : "", privacy: .public)")
                 }
                 since = events.last.map { max(since, $0.id) } ?? since
                 try await handle(events)
+                if gapped && reseedAfterGap { needsSeed = true }
             } catch {
                 guard !Task.isCancelled else { return }
                 consecutiveFailures += 1

@@ -68,14 +68,17 @@ struct SyncthingAPI: Equatable {
         return try JSONDecoder().decode(Response.self, from: data).myID
     }
 
-    /// `POST /rest/system/pause` with no `device` parameter → pause all devices.
-    func pauseAllDevices() async throws {
-        _ = try await send("/rest/system/pause", method: "POST")
-    }
-
-    /// `POST /rest/system/resume` with no `device` parameter → resume all devices.
-    func resumeAllDevices() async throws {
-        _ = try await send("/rest/system/resume", method: "POST")
+    /// `POST /rest/system/pause|resume[?device=]` → pause or resume one device,
+    /// or every remote device when `device` is nil (the daemon loops over
+    /// them; there is no stored "all paused" state, just each device's
+    /// flag). Unlike folders, devices have a real pause endpoint. The daemon
+    /// answers with ConfigSaved + DevicePaused/DeviceResumed per device, so
+    /// the new state reaches the monitor and the activity feed by event —
+    /// callers never flip local state themselves.
+    func setPaused(_ paused: Bool, device: String? = nil) async throws {
+        var path = "/rest/system/\(paused ? "pause" : "resume")"
+        if let device { path += "?device=\(try Self.encodeURLComponent(device))" }
+        _ = try await send(path, method: "POST")
     }
 
     /// `POST /rest/system/shutdown` → ask the daemon to exit cleanly and not restart.
@@ -118,6 +121,11 @@ struct SyncthingAPI: Equatable {
         let type: String?
         /// The devices this folder is shared with, INCLUDING this device.
         let devices: [SharedDevice]?
+
+        /// The name every surface shows: the label, else the id. Labels are
+        /// free text (duplicates allowed), so this is for reading, never
+        /// for keying — key on `id`.
+        var displayName: String { label.isEmpty ? id : label }
     }
 
     /// `GET /rest/config/folders` → the configured folders (id, label, filesystem path).
@@ -126,9 +134,27 @@ struct SyncthingAPI: Equatable {
         return try JSONDecoder().decode([Folder].self, from: data)
     }
 
-    /// `POST /rest/db/scan` with no `folder` parameter → rescan all folders.
-    func rescanAll() async throws {
-        _ = try await send("/rest/db/scan", method: "POST")
+    /// `POST /rest/db/scan[?folder=]` → rescan one folder, or every folder
+    /// when `folder` is nil.
+    func rescan(folder id: String? = nil) async throws {
+        var path = "/rest/db/scan"
+        if let id { path += "?folder=\(try Self.encodeURLComponent(id))" }
+        _ = try await send(path, method: "POST")
+    }
+
+    /// `PATCH /rest/config/folders/{id}` with `{"paused": …}` → pause or resume
+    /// one folder. Folder pause is a CONFIG flag, not a pause endpoint (those
+    /// are device-only); the partial patch has been accepted since 1.12. The
+    /// daemon answers with ConfigSaved + FolderPaused/FolderResumed, so the
+    /// new state reaches the monitor and the activity feed by event — callers
+    /// never flip local state themselves. KNOWN EDGE: the id rides in the
+    /// PATH, and the daemon's router matches the decoded path, so an id
+    /// containing "/" (legal, never generated) can't be addressed here and
+    /// 404s; the query-string verbs are unaffected.
+    func setFolderPaused(id: String, paused: Bool) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["paused": paused])
+        _ = try await send("/rest/config/folders/\(try Self.encodeURLComponent(id))",
+                           method: "PATCH", body: body)
     }
 
     /// `GET /rest/db/status?folder=` → the folder's current state ("idle",
@@ -137,7 +163,7 @@ struct SyncthingAPI: Equatable {
     /// creation onward, so current state must be read directly.
     func folderState(id: String) async throws -> String {
         struct Response: Decodable { let state: String }
-        let data = try await send("/rest/db/status?folder=\(try Self.encodeQueryValue(id))",
+        let data = try await send("/rest/db/status?folder=\(try Self.encodeURLComponent(id))",
                                   method: "GET")
         return try JSONDecoder().decode(Response.self, from: data).state
     }
@@ -147,7 +173,7 @@ struct SyncthingAPI: Equatable {
     /// folder entering `error` — that event carries only the word.
     func folderStatusError(id: String) async throws -> String? {
         struct Response: Decodable { let error: String? }
-        let data = try await send("/rest/db/status?folder=\(try Self.encodeQueryValue(id))",
+        let data = try await send("/rest/db/status?folder=\(try Self.encodeURLComponent(id))",
                                   method: "GET")
         let error = try JSONDecoder().decode(Response.self, from: data).error ?? ""
         return error.isEmpty ? nil : error
@@ -165,7 +191,7 @@ struct SyncthingAPI: Equatable {
     /// occur, so recovery must be observed by re-reading this.
     func folderErrors(id: String) async throws -> [FolderError] {
         struct Response: Decodable { let errors: [FolderError]? }
-        let data = try await send("/rest/folder/errors?folder=\(try Self.encodeQueryValue(id))",
+        let data = try await send("/rest/folder/errors?folder=\(try Self.encodeURLComponent(id))",
                                   method: "GET")
         return try JSONDecoder().decode(Response.self, from: data).errors ?? []
     }
@@ -195,8 +221,8 @@ struct SyncthingAPI: Equatable {
             let files: [File]?
             let perpage: Int?
         }
-        let query = "folder=\(try Self.encodeQueryValue(folder))"
-            + "&device=\(try Self.encodeQueryValue(device))"
+        let query = "folder=\(try Self.encodeURLComponent(folder))"
+            + "&device=\(try Self.encodeURLComponent(device))"
             + "&page=1&perpage=\(Self.remoteNeedPageSize)"
         let data = try await send("/rest/db/remoteneed?\(query)", method: "GET")
         let decoded = try JSONDecoder().decode(Response.self, from: data)
@@ -228,15 +254,15 @@ struct SyncthingAPI: Equatable {
             let global: Info?
             let availability: [Availability]?
         }
-        let query = "folder=\(try Self.encodeQueryValue(folder))"
-            + "&file=\(try Self.encodeQueryValue(file))"
+        let query = "folder=\(try Self.encodeURLComponent(folder))"
+            + "&file=\(try Self.encodeURLComponent(file))"
         let data = try await send("/rest/db/file?\(query)", method: "GET")
         let decoded = try JSONDecoder().decode(Response.self, from: data)
         return FileStatus(modifiedBy: decoded.global?.modifiedBy,
                           availableOn: (decoded.availability ?? []).map(\.id))
     }
 
-    private static func encodeQueryValue(_ value: String) throws -> String {
+    private static func encodeURLComponent(_ value: String) throws -> String {
         let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         guard let encoded = value.addingPercentEncoding(withAllowedCharacters: unreserved) else {
             throw APIError.badURL
@@ -253,6 +279,18 @@ struct SyncthingAPI: Equatable {
         let deviceID: String
         let paused: Bool
         var name: String? = nil
+
+        /// The name every surface shows: the user's name, else the short id.
+        var displayName: String {
+            name.flatMap { $0.isEmpty ? nil : $0 } ?? shortID
+        }
+
+        /// Syncthing's own short form of a device id: its first seven
+        /// characters. ONE definition — the activity feed keys its name table
+        /// by it, and any two spellings that drift would silently un-name
+        /// every remote party.
+        var shortID: String { Self.shortID(deviceID) }
+        static func shortID(_ deviceID: String) -> String { String(deviceID.prefix(7)) }
     }
 
     /// `GET /rest/config/devices` → the configured devices (including this one).
@@ -296,9 +334,11 @@ struct SyncthingAPI: Equatable {
         private enum DataKeys: String, CodingKey {
             case folder, to, device, errors, completion, needItems, needDeletes
             /// DeviceConnected/DeviceDisconnected name the device `id` where
-            /// DevicePaused/DeviceResumed/FolderCompletion say `device` —
-            /// an upstream inconsistency; `device` is decoded from either.
-            case deviceId = "id"
+            /// DevicePaused/DeviceResumed/FolderCompletion say `device`, and
+            /// FolderPaused/FolderResumed name the FOLDER `id` where every
+            /// other folder event says `folder` — upstream inconsistencies.
+            /// A bare `id` is read as whichever the event family names.
+            case bareID = "id"
         }
 
         init(from decoder: Decoder) throws {
@@ -306,10 +346,12 @@ struct SyncthingAPI: Equatable {
             id = try container.decode(Int.self, forKey: .id)
             type = try container.decode(String.self, forKey: .type)
             if let data = try? container.nestedContainer(keyedBy: DataKeys.self, forKey: .data) {
-                folder = try? data.decodeIfPresent(String.self, forKey: .folder)
+                let bareID = try? data.decodeIfPresent(String.self, forKey: .bareID)
+                folder = (try? data.decodeIfPresent(String.self, forKey: .folder))
+                    ?? (type.hasPrefix("Folder") ? bareID : nil)
                 to = try? data.decodeIfPresent(String.self, forKey: .to)
                 device = (try? data.decodeIfPresent(String.self, forKey: .device))
-                    ?? (try? data.decodeIfPresent(String.self, forKey: .deviceId))
+                    ?? (type.hasPrefix("Device") ? bareID : nil)
                 errors = try? data.decodeIfPresent([FolderError].self, forKey: .errors)
                 completion = try? data.decodeIfPresent(Double.self, forKey: .completion)
                 needItems = try? data.decodeIfPresent(Int.self, forKey: .needItems)
@@ -496,8 +538,8 @@ struct SyncthingAPI: Equatable {
     /// the folder. Fails (404) for a device that doesn't share the folder —
     /// callers use that to discover sharing.
     func completion(folder: String, device: String) async throws -> Completion {
-        let query = "folder=\(try Self.encodeQueryValue(folder))"
-            + "&device=\(try Self.encodeQueryValue(device))"
+        let query = "folder=\(try Self.encodeURLComponent(folder))"
+            + "&device=\(try Self.encodeURLComponent(device))"
         let data = try await send("/rest/db/completion?\(query)", method: "GET")
         return try JSONDecoder().decode(Completion.self, from: data)
     }

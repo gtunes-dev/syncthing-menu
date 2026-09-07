@@ -96,10 +96,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onAbout: { aboutController.show() }
         )
         controller.onOpenActivity = { reset in activityController.show(reset: reset) }
-        controller.onMenuWillOpen = { [weak self] in self?.refreshFolders() }
         controller.onStartSyncthing = { [weak self] in self?.launchDaemon() }
-        controller.onRescanAll = { [weak self] in self?.rescanAll() }
-        controller.onPauseToggle = { [weak self] pause in self?.setAllDevicesPaused(pause) }
+        // Daemon verbs: fire the call; the resulting state comes back through
+        // the monitor's event stream (within milliseconds), so nothing is
+        // flipped locally — one source of truth (`daemonVerb`).
+        controller.onRescanAll = { [weak self] in
+            self?.daemonVerb("Rescan all") { try await $0.rescan() }
+        }
+        controller.onPauseToggle = { [weak self] pause in
+            self?.daemonVerb(pause ? "Pause all devices" : "Resume all devices") {
+                try await $0.setPaused(pause)
+            }
+        }
+        controller.onRescanFolder = { [weak self] id in
+            self?.daemonVerb("Rescan folder") { try await $0.rescan(folder: id) }
+        }
+        controller.onSetFolderPaused = { [weak self] id, paused in
+            self?.daemonVerb(paused ? "Pause folder" : "Resume folder") {
+                try await $0.setFolderPaused(id: id, paused: paused)
+            }
+        }
+        controller.onSetDevicePaused = { [weak self] id, paused in
+            self?.daemonVerb(paused ? "Pause device" : "Resume device") {
+                try await $0.setPaused(paused, device: id)
+            }
+        }
         controller.onUpdateApp = { [weak self] in self?.appUpdateSource.installAvailable() }
         controller.onUpdateSyncthing = { [weak self] in self?.syncthingUpdateSource.installAvailable() }
         statusItemController = controller
@@ -137,21 +158,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // stickier facts — kept until a real disconnect.
         syncthingMonitor.onEndpointSuspect = { [weak self] in
             guard let self else { return }
-            self.lastMonitorSnapshot.activity = .idle
-            self.pushStatus()
+            // Same fan-out as a live snapshot: the one write path.
+            var snapshot = self.lastMonitorSnapshot
+            snapshot.activity = .idle
+            self.apply(snapshot: snapshot)
             self.daemonSession?.endpointSuspect()
         }
 
-        // The monitor's snapshot feeds the status model (which drives the
-        // icon's Paused/Syncing/attention marks, the status line, and the
-        // Pause⇄Resume toggle label) plus the FDA section's alert state in
-        // Settings.
-        syncthingMonitor.onChange = { [weak self] snapshot in
-            guard let self else { return }
-            self.folderHealth.permissionErrorFolders = snapshot.permissionErrorFolders
-            self.lastMonitorSnapshot = snapshot
-            self.pushStatus()
-        }
+        // The monitor's snapshot is the one source for everything
+        // daemon-side: the status model (icon marks, status line), the
+        // menu's lists, and the FDA section's alert state in Settings.
+        syncthingMonitor.onChange = { [weak self] in self?.apply(snapshot: $0) }
 
         // After an upgrade settles, re-root the daemon supervisor: a fresh spawn
         // (new PID, fresh disclaim, canonical binary) ends the swap's TCC
@@ -313,19 +330,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 fetchSelfManagedVersion(api)
                 pushStatus()
             }
-            refreshFolders()
         case .unavailable:
             lastPublishedAPI = nil
             syncthingMonitor.disconnect()
             activityFeed.disconnect()
             syncthingUpdateSource.sessionChanged(api: nil)
-            statusItemController?.update(folders: [])
             statusItemController?.update(webUIURL: nil)
-            // The monitor's last snapshot dies with the daemon.
-            folderHealth.permissionErrorFolders = []
-            lastMonitorSnapshot = .init()
             syncthingStatus.update(selfManagedDaemonVersion: nil)
-            pushStatus()
+            // The monitor's last snapshot dies with the daemon — every
+            // consumer sees the empty one through the same path a live one
+            // takes, so nothing can be forgotten at teardown.
+            apply(snapshot: .init())
         case .connecting:
             // Transient (startup discovery or post-suspicion re-verify):
             // consumers keep what they have until it resolves. Self-managed
@@ -404,52 +419,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func runningPhase() -> SyncthingStatusModel.Phase {
         .running(activity: lastMonitorSnapshot.activity,
                  paused: lastMonitorSnapshot.allDevicesPaused,
-                 attention: !lastMonitorSnapshot.permissionErrorFolders.isEmpty)
+                 attention: lastMonitorSnapshot.folderAttention)
+    }
+
+    /// Fan one monitor snapshot out to every consumer — the live path and
+    /// the teardown path (an empty snapshot) are the same call.
+    private func apply(snapshot: SyncthingMonitor.Snapshot) {
+        lastMonitorSnapshot = snapshot
+        // @Published with no dedupe of its own: only write a real change, or
+        // every activity flip re-renders the Settings FDA section.
+        let blocked = snapshot.permissionErrorFolders
+        if folderHealth.permissionErrorFolders != blocked {
+            folderHealth.permissionErrorFolders = blocked
+        }
+        pushStatus()
+        statusItemController?.update(snapshot: snapshot)
     }
 
     /// A REST client for the running daemon, or nil when it isn't reachable.
     private var currentAPI: SyncthingAPI? { daemonSession?.api }
 
-    /// Fetch the daemon's configured folders and push them to the menu. Leaves the
-    /// current list untouched on a transient failure; clears it when the daemon
-    /// isn't reachable.
-    private func refreshFolders() {
+    /// Fire one daemon verb against the running daemon and log a failure.
+    /// No local state changes here — the result comes back through the
+    /// monitor's event stream (a pause is ConfigSaved + Paused/Resumed
+    /// events; a scan is StateChanged), which is the one source of truth.
+    /// A no-op when the daemon isn't reachable: the verbs are hidden then.
+    private func daemonVerb(_ label: String,
+                            _ op: @escaping (SyncthingAPI) async throws -> Void) {
         guard let api = currentAPI else {
-            statusItemController?.update(folders: [])
+            // Reachable only mid-suspicion (the verbs stay visible while the
+            // session re-verifies): say so rather than silently doing nothing.
+            Log.app.log("\(label, privacy: .public) ignored: Syncthing is not reachable right now")
             return
         }
-        Task { @MainActor in
-            guard let folders = try? await api.folders() else { return }
-            self.statusItemController?.update(folders: folders.map {
-                StatusItemController.FolderEntry(name: $0.label.isEmpty ? $0.id : $0.label,
-                                                 path: $0.path)
-            })
-        }
-    }
-
-    private func rescanAll() {
-        guard let api = currentAPI else { return }
         Task {
-            do { try await api.rescanAll() }
-            catch { Log.app.error("Rescan all failed: \(String(describing: error), privacy: .public)") }
-        }
-    }
-
-    /// Fire the pause/resume call; the resulting state comes back through the
-    /// monitor's event stream (within milliseconds), so there is no optimistic
-    /// local flip — one source of truth.
-    private func setAllDevicesPaused(_ pause: Bool) {
-        guard let api = currentAPI else { return }
-        Task {
-            do {
-                if pause {
-                    try await api.pauseAllDevices()
-                } else {
-                    try await api.resumeAllDevices()
-                }
-            } catch {
-                Log.app.error("\(pause ? "Pause" : "Resume", privacy: .public) all devices failed: \(String(describing: error), privacy: .public)")
-            }
+            do { try await op(api) }
+            catch { Log.app.error("\(label, privacy: .public) failed: \(String(describing: error), privacy: .public)") }
         }
     }
 

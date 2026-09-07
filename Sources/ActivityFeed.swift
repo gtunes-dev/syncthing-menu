@@ -741,12 +741,8 @@ final class ActivityFeed: ObservableObject {
         let devices = try await api.devices()
         let my = try await api.myID()
         myID = my
-        folderLabels = Dictionary(uniqueKeysWithValues: folders
-            .map { ($0.id, $0.label.isEmpty ? $0.id : $0.label) })
-        deviceNames = Dictionary(uniqueKeysWithValues: devices.map {
-            (String($0.deviceID.prefix(7)),
-             ($0.name?.isEmpty ?? true) ? String($0.deviceID.prefix(7)) : $0.name!)
-        })
+        folderLabels = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0.displayName) })
+        deviceNames = Dictionary(uniqueKeysWithValues: devices.map { ($0.shortID, $0.displayName) })
         folderSharers = Dictionary(uniqueKeysWithValues: folders.map { folder in
             (folder.id, Set((folder.devices ?? []).map(\.deviceID)).subtracting([my]))
         })
@@ -1393,7 +1389,7 @@ final class ActivityFeed: ObservableObject {
     }
 
     private func displayName(forFullID id: String) -> String {
-        let short = String(id.prefix(7))
+        let short = SyncthingAPI.Device.shortID(id)
         return deviceNames[short] ?? short
     }
 }

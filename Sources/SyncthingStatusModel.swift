@@ -20,6 +20,12 @@ import Foundation
 /// failed, not running) bypass smoothing entirely and render immediately —
 /// they must never lag or be overstated.
 ///
+/// `paused` means ONE thing: every remote device is paused — the state the
+/// daemon's unscoped pause call produces (indistinguishable from pausing each
+/// device by hand, in the daemon too). It never reasons over folders, and
+/// there is no partial variant: anything short of all devices shows only as
+/// the menu's pause marks on the lists and rows that hold it.
+///
 /// Main thread only (every publisher feeds UI).
 final class SyncthingStatusModel: ObservableObject {
     enum Phase: Equatable {
@@ -72,6 +78,7 @@ final class SyncthingStatusModel: ObservableObject {
         case keyRejected
         /// A folder Syncthing can't access (permission error) — needs the user.
         case attention
+        /// Every remote device paused (see the class doc).
         case paused
         case syncing
         case scanning
@@ -262,7 +269,9 @@ final class SyncthingStatusModel: ObservableObject {
         case .unreachable: "Not reachable"
         case .keyRejected: "API key rejected"
         case .attention: "Can't access some folders"
-        case .paused: "Paused"
+        // "All": partial pauses have their own signal (the menu's marks), so
+        // the word that separates this state from them is the one to show.
+        case .paused: "All Paused"
         case .syncing: "Syncing…"
         case .scanning: "Scanning…"
         case .running: "Running"
@@ -283,7 +292,7 @@ final class SyncthingStatusModel: ObservableObject {
         case .keyRejected: "Syncthing rejected the API key — check Settings"
         case .attention:
             "Syncthing can't access some folders — open Settings (Full Disk Access may be needed)"
-        case .paused: "Syncthing is paused"
+        case .paused: "All of Syncthing's devices are paused"
         case .syncing: "Syncthing is syncing"
         case .scanning: "Syncthing is scanning"
         case .running: "Syncthing is running"
@@ -292,11 +301,6 @@ final class SyncthingStatusModel: ObservableObject {
 
     var isRunning: Bool {
         if case .running = phase { return true }
-        return false
-    }
-
-    var isPaused: Bool {
-        if case .running(_, true, _) = phase { return true }
         return false
     }
 

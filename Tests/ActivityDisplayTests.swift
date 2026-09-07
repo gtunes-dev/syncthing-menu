@@ -247,6 +247,7 @@ struct ActivityDisplayTests {
 
     /// The one-line status grammar and its priority chain: attention > paused
     /// > syncing > scanning > running — the same order as the menu status row.
+    /// Paused = every device paused; partial pauses are the menu's marks.
     @Test func statusTextPriorityChain() {
         let model = SyncthingStatusModel()
         #expect(model.statusText == "Not running")
@@ -258,7 +259,6 @@ struct ActivityDisplayTests {
         model.update(.running(activity: .idle, paused: false, attention: false))
         #expect(model.statusText == "Running")
         #expect(model.isRunning)
-        #expect(!model.isPaused)
 
         model.update(.running(activity: .scanning, paused: false, attention: false))
         #expect(model.statusText == "Scanning…")
@@ -267,8 +267,7 @@ struct ActivityDisplayTests {
         #expect(model.statusText == "Syncing…")
 
         model.update(.running(activity: .syncing, paused: true, attention: false))
-        #expect(model.statusText == "Paused")
-        #expect(model.isPaused)
+        #expect(model.statusText == "All Paused")
 
         model.update(.running(activity: .syncing, paused: true, attention: true))
         #expect(model.statusText == "Can't access some folders")
@@ -315,7 +314,7 @@ struct ActivityDisplayTests {
         #expect(model.summaryText == "Syncthing is syncing")
 
         model.update(.running(activity: .syncing, paused: true, attention: false))
-        #expect(model.summaryText == "Syncthing is paused")
+        #expect(model.summaryText == "All of Syncthing's devices are paused")
 
         model.update(.failed("boom"))
         #expect(model.summaryText == "Syncthing failed — boom")
