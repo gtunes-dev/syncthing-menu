@@ -364,12 +364,12 @@ struct SyncthingAPI: Equatable {
         let needItems: Int?
         let needDeletes: Int?
         /// LocalIndexUpdated: how many index items the batched event covers —
-        /// the activity feed's burst backstop (batched events survive the
+        /// the activity feed's index backstop (batched events survive the
         /// ring overflow that eats per-file change events).
         let items: Int?
         /// LocalIndexUpdated: the batch's file names. Complete when its
-        /// count equals `items` — then the backstop can recover missed
-        /// changes BY NAME instead of aggregating.
+        /// count equals `items` — then the backstop recovers missed changes
+        /// BY NAME, per item; a count alone is only a diagnostic.
         let filenames: [String]?
         /// RemoteDownloadProgress: the paths the remote device is actively
         /// downloading (the keys of its `state` block-count map).

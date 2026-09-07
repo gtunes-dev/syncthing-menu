@@ -405,13 +405,12 @@ struct ActivityFeedTests {
         #expect(!feed.activity.contains { $0.kind == .delivered })
     }
 
-    // MARK: The bulk tier (machine-scale churn)
+    // MARK: Scale (every item, always)
 
-    /// A batch carrying more detections than the bulk threshold for one
-    /// folder is machine-scale churn: it logs ONE bulk detected entry (the
-    /// count), not a wall of rows — and the matching ending arrives at the
-    /// same granularity: one bulk delivered entry on catch-up.
-    @Test func burstAboveThresholdCoalescesToBulkEntries() async throws {
+    /// Granularity is per item at ANY scale (principle 5, rewritten
+    /// 2026-09-06): a burst of 1,500 detections logs 1,500 rows, each
+    /// searchable, and the catch-up closes every one of them individually.
+    @Test func largeBurstLogsEveryItem() async throws {
         let server = try standardServer()
         defer { server.stop() }
         let feed = makeFeed()
@@ -420,27 +419,28 @@ struct ActivityFeedTests {
         feed.setWindowVisible(true)
         try await waitUntilPolling(server)
 
-        let count = ActivityFeed.bulkDetectionThreshold + 5
+        let count = 1_500
         let burst = (1...count).map { index in
             (type: "LocalChangeDetected",
              data: ["folder": "f1", "path": "churn/file\(index).dat",
                     "action": "modified"] as [String: Any])
         }
         server.pushEvents(burst)
-        try await expectEventually { feed.activity.count == 1 }
-        #expect(feed.activity[0].kind == .detected)
-        #expect(feed.activity[0].bulkCount == count)
-        #expect(feed.activity[0].displayName == "\(count) changes")
-        #expect(feed.activity[0].partyDisplay == "This Mac")
-        #expect(feed.activity[0].folderLabel == "Folder One")
+        try await expectEventually(timeout: 15) { feed.activity.count == count }
+        #expect(feed.activity.allSatisfy { $0.kind == .detected && $0.partyDisplay == "This Mac" })
+        #expect(feed.activity.allSatisfy { $0.bulkCount == nil && !$0.path.isEmpty })
+        #expect(feed.activity.contains { $0.path == "churn/file1500.dat" })
 
         server.pushEvent(type: "FolderCompletion",
                          data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
                                 "completion": 100, "needItems": 0, "needDeletes": 0])
-        try await expectEventually { feed.activity.first?.kind == .delivered }
-        #expect(feed.activity.first?.bulkCount == count)
-        #expect(feed.activity.first?.partyDisplay == "Laptop")
-        #expect(feed.activity.count == 2)
+        try await expectEventually(timeout: 15) {
+            feed.activity.filter { $0.kind == .delivered }.count == count
+        }
+        #expect(feed.activity.count == 2 * count)
+        #expect(feed.activity.first { $0.kind == .delivered }?.partyDisplay == "Laptop")
+        #expect(feed.activity.filter { $0.kind == .delivered }
+                    .contains { $0.path == "churn/file7.dat" })
     }
 
     /// The LocalIndexUpdated backstop, named tier: when the event's
@@ -561,12 +561,11 @@ struct ActivityFeedTests {
         }?.operation == .deleted)
     }
 
-    /// The backstop's unnamed tier: with filenames truncated or absent, only
-    /// the count is trustworthy — an over-threshold surplus logs one bulk
-    /// entry, while a small unnamed surplus is suppressed entirely (the
-    /// spurious "1 change" rows seen live 2026-08-17 were exactly this
-    /// bookkeeping slop rendered as fact).
-    @Test func indexUpdateUnnamedSurplusAggregatesOrSuppresses() async throws {
+    /// The backstop without names: with filenames truncated or absent, only
+    /// a count remains, and a count is not specific activity — it is logged
+    /// as a diagnostic, never as a row, at any size (the spurious "1 change"
+    /// rows seen live 2026-08-17 were exactly this slop rendered as fact).
+    @Test func indexUpdateUnnamedSurplusLogsNothing() async throws {
         let server = try standardServer()
         defer { server.stop() }
         let feed = makeFeed()
@@ -575,31 +574,23 @@ struct ActivityFeedTests {
         feed.setWindowVisible(true)
         try await waitUntilPolling(server)
 
-        // Small unnamed surplus (5 items, nothing witnessed, no filenames):
-        // suppressed — no entry at all (marker proves processing).
+        // Unnamed surplus, small or large (no filenames, or truncated ones):
+        // a count is not specific activity — no row, at any size.
         server.pushEvent(type: "LocalIndexUpdated",
                          data: ["folder": "f1", "items": 5])
+        server.pushEvent(type: "LocalIndexUpdated",
+                         data: ["folder": "f1", "items": 6_000,
+                                "filenames": ["partial1.txt", "partial2.txt"]])
         server.pushEvent(type: "LocalChangeDetected",
                          data: ["folder": "f1", "path": "marker.txt", "action": "modified"])
         try await expectEventually { feed.activity.contains { $0.path == "marker.txt" } }
         #expect(feed.activity.count == 1)
 
-        // Large surplus with truncated filenames (count != items): the
-        // count is real churn scale — one bulk entry, closed in bulk.
-        server.pushEvent(type: "LocalIndexUpdated",
-                         data: ["folder": "f1", "items": 60,
-                                "filenames": ["partial1.txt", "partial2.txt"]])
-        try await expectEventually {
-            // 60 items minus the one witnessed marker = 59 unwitnessed.
-            feed.activity.contains { $0.kind == .detected && $0.bulkCount == 59 }
-        }
-
         server.pushEvent(type: "FolderCompletion",
                          data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
                                 "completion": 100, "needItems": 0, "needDeletes": 0])
-        try await expectEventually {
-            feed.activity.contains { $0.kind == .delivered && $0.bulkCount == 59 }
-        }
+        try await expectEventually { feed.activity.first?.kind == .delivered }
+        #expect(feed.activity.count == 2)   // only the marker's own delivery
     }
 
     // MARK: The quiescence sweep
@@ -1278,12 +1269,12 @@ struct ActivityFeedTests {
         #expect(daemonRows(feed).allSatisfy { $0.partyDisplay == "Laptop" })
     }
 
-    /// The bulk twin of the index-first duplicate guard: an index event
-    /// arriving BEFORE its change events at scale logs one bulk recovery,
-    /// and the change events that follow consume that budget instead of
-    /// coalescing into a second identical "N changes" row. The budget
-    /// retires at the next index cycle, so later changes log normally.
-    @Test func indexUpdateArrivingFirstAtBulkScaleDoesNotDouble() async throws {
+    /// The index-first duplicate guard at scale: an index event arriving
+    /// BEFORE its change events recovers every name per item, and the change
+    /// events that follow consume their markers (enriching the rows) instead
+    /// of logging again. The markers retire at the next index cycle, so
+    /// later changes log normally.
+    @Test func indexUpdateArrivingFirstAtScaleDoesNotDouble() async throws {
         let server = try standardServer()
         defer { server.stop() }
         let feed = makeFeed()
@@ -1292,23 +1283,26 @@ struct ActivityFeedTests {
         feed.setWindowVisible(true)
         try await waitUntilPolling(server)
 
-        let count = ActivityFeed.bulkDetectionThreshold + 5
-        let names = (1...count).map { "bulk-\($0).txt" }
+        let count = 1_200
+        let names = (1...count).map { "many-\($0).txt" }
         server.pushEvent(type: "LocalIndexUpdated",
                          data: ["folder": "f1", "items": count, "filenames": names])
-        try await expectEventually { feed.activity.count == 1 }
-        #expect(feed.activity[0].bulkCount == count)
+        try await expectEventually(timeout: 15) { feed.activity.count == count }
+        #expect(feed.activity.allSatisfy { $0.kind == .detected && $0.itemType == nil })
 
+        // The change events arrive after: each consumes its recovery marker
+        // and enriches its row — no duplicates, kinds filled in.
         server.pushEvents(names.map {
-            (type: "LocalChangeDetected", data: ["folder": "f1", "path": $0, "action": "modified"])
+            (type: "LocalChangeDetected",
+             data: ["folder": "f1", "path": $0, "action": "modified", "type": "file"])
         })
         server.pushEvent(type: "LocalChangeDetected",
                          data: ["folder": "OTHER", "path": "marker", "action": "modified"])
-        try await expectEventually { feed.activity.contains { $0.path == "marker" } }
-        #expect(feed.activity.filter { $0.bulkCount != nil }.count == 1)
-        #expect(feed.activity.count == 2)
+        try await expectEventually(timeout: 15) { feed.activity.contains { $0.path == "marker" } }
+        #expect(feed.activity.count == count + 1)
+        #expect(feed.activity.filter { $0.folderID == "f1" }.allSatisfy { $0.itemType == .file })
 
-        // Next index cycle retires the budget: a fresh change logs.
+        // Next index cycle retires the markers: a fresh change logs.
         server.pushEvent(type: "LocalIndexUpdated",
                          data: ["folder": "f1", "items": count, "filenames": names])
         server.pushEvent(type: "LocalChangeDetected",
@@ -1334,11 +1328,14 @@ struct ActivityFeedTests {
         server.pushEvent(type: "StateChanged",
                          data: ["folder": "f1", "from": "scanning", "to": "idle",
                                 "duration": 35])
+        // (The seed reads each folder's status once for the syncing set.)
+        let statusReads = { server.requestedPaths.filter { $0.contains("/rest/db/status") }.count }
+        let before = statusReads()
         server.pushEvent(type: "StateChanged",
                          data: ["folder": "f1", "from": "idle", "to": "error", "duration": 3])
         try await expectEventually { daemonRows(feed).count == 1 }
         #expect(daemonRows(feed)[0].kind == .folderError("folder path missing"))
-        #expect(server.requestedPaths.filter { $0.contains("/rest/db/status") }.count == 1)
+        #expect(statusReads() == before + 1)
 
         server.pushEvent(type: "FolderWatchStateChanged",
                          data: ["folder": "f1", "to": "too many open files"])
@@ -1458,6 +1455,209 @@ struct ActivityFeedTests {
         #expect(byPath("bad.txt")?.kind == .failed("permission denied")
                 && byPath("bad.txt")?.itemType == .file)
         #expect(byPath("s")?.kind == .applied && byPath("s")?.itemType == .symlink)
+    }
+
+    // MARK: Inbound pulls and the index backstop
+
+    private func pushSyncing(_ server: FakeSyncthingServer, folder: String = "f1") {
+        server.pushEvent(type: "StateChanged",
+                         data: ["folder": folder, "from": "idle", "to": "syncing"])
+    }
+
+    private func pushIdle(_ server: FakeSyncthingServer, folder: String = "f1") {
+        server.pushEvent(type: "StateChanged",
+                         data: ["folder": folder, "from": "syncing", "to": "idle", "duration": 9])
+    }
+
+    private func pushApplied(_ server: FakeSyncthingServer, _ path: String,
+                             error: String? = nil) {
+        var data: [String: Any] = ["folder": "f1", "item": path, "action": "update",
+                                   "type": "file"]
+        if let error { data["error"] = error }
+        server.pushEvent(type: "ItemFinished", data: data)
+    }
+
+    /// The index backstop stands down while a folder pulls (our index grows
+    /// from pulls too), and un-fabricates a recovery that beat its inbound
+    /// event: no "Detected" or outbound loop for items that arrived here.
+    @Test func backstopIgnoresIndexGrowthFromPulls() async throws {
+        let server = try standardServer()
+        defer { server.stop() }
+        let feed = makeFeed()
+        defer { feed.disconnect() }
+        feed.connect(api: api(for: server))
+        feed.setWindowVisible(true)
+        try await waitUntilPolling(server)
+
+        // Index event first (a pulled file), its ItemFinished second, while
+        // NOT known to be syncing: the recovery is undone when the pull
+        // event arrives — no detected row, no loop to confirm.
+        server.pushEvent(type: "LocalIndexUpdated",
+                         data: ["folder": "f1", "items": 1, "filenames": ["pulled.txt"]])
+        try await expectEventually { feed.activity.count == 1 }
+        pushApplied(server, "pulled.txt")
+        try await expectEventually { feed.activity.first?.kind == .applied }
+        #expect(feed.activity.count == 1)
+        pushFullCatchUp(server)
+        server.pushEvent(type: "LocalChangeDetected",
+                         data: ["folder": "OTHER", "path": "m1", "action": "modified"])
+        try await expectEventually { feed.activity.contains { $0.path == "m1" } }
+        #expect(!feed.activity.contains { $0.kind == .delivered })
+
+        // While syncing, index growth is the pull: the backstop logs nothing
+        // even for a thousand unwitnessed names.
+        pushSyncing(server)
+        server.pushEvent(type: "LocalIndexUpdated",
+                         data: ["folder": "f1", "items": 1000,
+                                "filenames": (1...1000).map { "in/\($0)" }])
+        server.pushEvent(type: "LocalChangeDetected",
+                         data: ["folder": "OTHER", "path": "m2", "action": "modified"])
+        try await expectEventually { feed.activity.contains { $0.path == "m2" } }
+        #expect(!feed.activity.contains { $0.kind == .detected && $0.folderID == "f1" })
+    }
+
+    // MARK: Out-of-band rows, the window, and seeded syncing state
+
+    /// The lost-Delivered race (review, 2026-09-07): a transfer-end
+    /// availability check resolving while the NEXT batch is parked on a
+    /// network read must not be overwritten by that batch's commit — the
+    /// ledger loop is already closed, so the ending would be gone for good.
+    @Test func deliveryCheckSurvivesAParkedBatch() async throws {
+        let server = try standardServer()
+        defer { server.stop() }
+        server.setFileAvailability(folder: "f1", path: "big.mov", devices: ["REMOTE7-FULL-ID"])
+        server.setRemoteNeed(folder: "f1", device: "REMOTE7-FULL-ID", names: ["a.txt"])
+        let feed = makeFeed()
+        defer { feed.disconnect() }
+        feed.connect(api: api(for: server))
+        feed.setWindowVisible(true)
+        try await waitUntilPolling(server)
+
+        // A tracked item (so the completion cue below issues a remoteneed
+        // read) and a transfer in progress.
+        server.pushEvent(type: "LocalChangeDetected",
+                         data: ["folder": "f1", "path": "a.txt", "action": "modified"])
+        server.pushEvent(type: "RemoteDownloadProgress",
+                         data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
+                                "state": ["big.mov": 4]])
+        try await expectEventually { feed.activity.count == 2 }
+
+        // The transfer ends: its check is spawned at this batch's commit but
+        // parked (db/file held). Then the next batch parks on remoteneed.
+        server.holdRequests(containing: "db/file")
+        server.holdRequests(containing: "db/remoteneed")
+        server.pushEvent(type: "RemoteDownloadProgress",
+                         data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
+                                "state": [String: Int]()])
+        try await expectEventually { server.heldRequestCount == 1 }   // the check
+        server.pushEvent(type: "FolderCompletion",
+                         data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
+                                "completion": 50, "needItems": 1])
+        try await expectEventually { server.heldRequestCount == 2 }   // the parked batch
+
+        // The check resolves while the batch is parked…
+        server.releaseHeldRequests(containing: "db/file")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        // …then the batch commits: the delivered row must be in the log.
+        server.releaseHeldRequests(containing: "db/remoteneed")
+        try await expectEventually {
+            feed.activity.contains { $0.kind == .delivered && $0.path == "big.mov" }
+        }
+        #expect(feed.activity.filter { $0.kind == .delivered }.count == 1)
+    }
+
+    /// A delivery confirmed just before a loop RESTART (session republish)
+    /// still lands: the restart keeps the ledger, so the queued ending
+    /// belongs with its loop and is not dropped; a check still pending at
+    /// the restart retires (its loop stays open for the catch-up instead).
+    @Test func deliveryQueuedAcrossRestartStillLands() async throws {
+        let server = try standardServer()
+        defer { server.stop() }
+        server.setFileAvailability(folder: "f1", path: "big.mov", devices: ["REMOTE7-FULL-ID"])
+        let feed = makeFeed()
+        defer { feed.disconnect() }
+        feed.connect(api: api(for: server))
+        feed.setWindowVisible(true)
+        try await waitUntilPolling(server)
+
+        server.pushEvent(type: "RemoteDownloadProgress",
+                         data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
+                                "state": ["big.mov": 4]])
+        try await expectEventually { feed.activity.count == 1 }
+
+        // The transfer ends; the check parks (db/file held). Hold the next
+        // batch's remoteneed read too, so the batch that follows the
+        // restart is parked when the check resolves.
+        server.holdRequests(containing: "db/file")
+        server.pushEvent(type: "RemoteDownloadProgress",
+                         data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
+                                "state": [String: Int]()])
+        try await expectEventually { server.heldRequestCount == 1 }
+
+        // Restart the loop (a session republish) BEFORE the check resolves:
+        // the pending check retires by epoch, the loop stays open…
+        let polls = pollCount(server)
+        feed.connect(api: api(for: server))
+        try await expectEventually { pollCount(server) > polls }
+        server.releaseHeldRequests(containing: "db/file")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(!feed.activity.contains { $0.kind == .delivered })
+
+        // …and the catch-up closes it: the ending lands after the restart.
+        pushFullCatchUp(server)
+        try await expectEventually {
+            feed.activity.contains { $0.kind == .delivered && $0.path == "big.mov" }
+        }
+    }
+
+    /// The window is one bound for display and memory: beyond it the oldest
+    /// rows go; endings for evicted beginnings still land (the ledger
+    /// outlives the window) and the newest rows are what remain.
+    @Test func windowEvictsOldestRowsAndEndingsStillLand() async throws {
+        let server = try standardServer()
+        defer { server.stop() }
+        let feed = ActivityFeed(windowSize: 10)
+        feed.retrySleep = fastSleep
+        defer { feed.disconnect() }
+        feed.connect(api: api(for: server))
+        feed.setWindowVisible(true)
+        try await waitUntilPolling(server)
+
+        for i in 1...15 {
+            server.pushEvent(type: "LocalChangeDetected",
+                             data: ["folder": "f1", "path": "f\(i).txt", "action": "modified"])
+        }
+        try await expectEventually { feed.entries.contains { $0.path == "f15.txt" } }
+        #expect(feed.entries.count == 10)
+        #expect(!feed.entries.contains { $0.path == "f1.txt" })
+
+        pushFullCatchUp(server)
+        try await expectEventually {
+            feed.entries.filter { $0.kind == .delivered }.count == 10
+        }
+        #expect(feed.entries.count == 10)   // 15 deliveries; the window keeps the newest 10
+        #expect(feed.entries.allSatisfy { $0.kind == .delivered })
+    }
+
+    /// A folder already syncing when the loop starts is known from the seed:
+    /// the backstop stands down for it from the first index event.
+    @Test func syncingStateIsSeededAtLoopStart() async throws {
+        let server = try standardServer()
+        defer { server.stop() }
+        server.folders = [.init(id: "f1", label: "Folder One", state: "syncing")]
+        let feed = makeFeed()
+        defer { feed.disconnect() }
+        feed.connect(api: api(for: server))
+        feed.setWindowVisible(true)
+        try await waitUntilPolling(server)
+
+        server.pushEvent(type: "LocalIndexUpdated",
+                         data: ["folder": "f1", "items": 3,
+                                "filenames": ["p1", "p2", "p3"]])
+        server.pushEvent(type: "LocalChangeDetected",
+                         data: ["folder": "OTHER", "path": "marker", "action": "modified"])
+        try await expectEventually { feed.activity.contains { $0.path == "marker" } }
+        #expect(!feed.activity.contains { $0.folderID == "f1" })
     }
 
     // MARK: Clear & cost bounds

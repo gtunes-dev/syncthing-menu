@@ -104,10 +104,7 @@ struct ActivityView: View {
     }
 
     /// An empty window must explain itself: what will appear, that nothing
-    /// being here is normal — or that a filter is hiding what IS here. When
-    /// a name search comes up empty while the log holds BULK entries, say
-    /// so: the searched-for file may be inside a count (bulk entries carry
-    /// no paths), and silence would read as "my file didn't sync".
+    /// being here is normal — or that a filter is hiding what IS here.
     private func emptyFeed(filtered: Bool) -> some View {
         VStack(spacing: 8) {
             Image(systemName: filtered ? "line.3.horizontal.decrease" : "tray")
@@ -119,12 +116,6 @@ struct ActivityView: View {
                 Text("Filters are hiding the current activity.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
-                if !display.searchText.isEmpty,
-                   feed.entries.contains(where: { $0.bulkCount != nil }) {
-                    Text("Some changes were recorded in bulk and can't be matched by name.")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
                 Button("Clear Filters") { display.clear() }
                     .controlSize(.small)
             } else {
@@ -156,15 +147,15 @@ final class ActivityDisplayModel: ObservableObject {
 
     /// The toolbar search field's text: case-insensitive substring match
     /// against the folder-relative path (a superset of "part of a
-    /// filename"). Brute force over ≤500 retained entries — trivially cheap,
+    /// filename"). Brute force over the retained window — trivially cheap,
     /// and it doubles as the episode lens: searching a filename shows that
-    /// file's lifecycle thread in order. Bulk entries carry no path, so they
-    /// never match a non-empty search (documented boundary of the aggregate
-    /// tier; the empty state says so). Transient like every filter here.
+    /// file's lifecycle thread in order. Every file row is searchable —
+    /// nothing is ever collapsed into a summary (the 2026-09-06 design
+    /// review). Transient like every filter here.
     @Published var searchText = ""
 
     /// The third group: folder & device event rows (pause/resume, peers
-    /// online/offline, folder errors, long scans, watcher state). On by
+    /// online/offline, folder errors, watcher state). On by
     /// default; off lets someone watching a transfer hide the chatter.
     @Published var showDaemonEvents = true
 
@@ -352,6 +343,7 @@ private struct CustomizableFeedTable: View {
             .width(min: 70, ideal: 90)
             .customizationID("time")
         }
+        .background(UniformRowHeights())
         .onChange(of: customization) { _, new in
             if let data = try? JSONEncoder().encode(new) {
                 UserDefaults.standard.set(data, forKey: ActivityColumnStore.defaultsKey)
@@ -394,13 +386,94 @@ private struct LegacyFeedTable: View {
             }
             .width(min: 70, ideal: 90)
         }
+        .background(UniformRowHeights())
+    }
+}
+
+/// Tells the Table's NSTableView that our rows are uniform — which they are
+/// (every kind measures exactly the table's nominal 24pt) — so AppKit skips
+/// its automatic-row-height path. That path is AppKit's estimated-row-height
+/// cache (`NSTableRowHeightData`), and while SwiftUI's coordinator applies a
+/// large row diff it re-enters itself: "Application performed a reentrant
+/// operation in its NSTableView delegate… will become an assert" on every
+/// thousand-row commit (backtrace captured live 2026-09-07 — no frame of
+/// ours; SwiftUI sets `usesAutomaticRowHeights` and implements no
+/// `heightOfRow`, so the flag is the whole mechanism). Fixed heights avoid
+/// the cache entirely and spare the per-row measurement of thousands of
+/// cells. Verified headless that the setting survives SwiftUI's subsequent
+/// updates (`ActivityTableRowHeightTests`).
+///
+/// Mechanism: a zero-size background view inside the Table's hosting
+/// hierarchy. SwiftUI updates a representable only when its inputs change
+/// (never, here), so the view triggers itself: on mount and on each of its
+/// own layouts it looks up the enclosing NSTableView (a sibling subtree,
+/// mounted a turn or two later) and applies the setting once. Failure mode
+/// if SwiftUI restructures: the table is not found and nothing changes —
+/// the warning returns, cosmetic only. Rows are single-line by design
+/// (middle truncation); a taller cell would clip.
+private struct UniformRowHeights: NSViewRepresentable {
+    func makeNSView(context: Context) -> ApplierView { ApplierView(frame: .zero) }
+    func updateNSView(_ view: ApplierView, context: Context) { view.scheduleApply() }
+
+    final class ApplierView: NSView {
+        private var applied = false
+        private var attempts = 0
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            scheduleApply()
+        }
+
+        override func layout() {
+            super.layout()
+            applyIfPossible()
+        }
+
+        /// Retry across a few run-loop turns: the table mounts after us.
+        func scheduleApply() {
+            guard !applied, attempts < 20 else { return }
+            attempts += 1
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.applied else { return }
+                self.applyIfPossible()
+                if !self.applied { self.scheduleApply() }
+            }
+        }
+
+        private func applyIfPossible() {
+            guard !applied, let table = Self.enclosingTableView(of: self) else { return }
+            if table.usesAutomaticRowHeights {
+                let height = table.rowHeight   // SwiftUI's nominal height; our rows match it
+                table.usesAutomaticRowHeights = false
+                table.rowHeight = height
+            }
+            applied = true
+        }
+
+        private static func enclosingTableView(of view: NSView) -> NSTableView? {
+            var ancestor: NSView? = view.superview
+            var depth = 0
+            while let candidate = ancestor, depth < 8 {
+                if let table = findTableView(in: candidate) { return table }
+                ancestor = candidate.superview
+                depth += 1
+            }
+            return nil
+        }
+
+        private static func findTableView(in view: NSView) -> NSTableView? {
+            if let table = view as? NSTableView { return table }
+            for sub in view.subviews {
+                if let found = findTableView(in: sub) { return found }
+            }
+            return nil
+        }
     }
 }
 
 // MARK: - Cells
 
-/// The item's path — or, for a bulk entry, its count summary ("312 changes"),
-/// set quieter to read as a summary line rather than a file.
+/// The item's path (or a marker's / daemon event's statement, set quieter).
 ///
 /// A DELETED item's name is struck through — the universal idiom, and it
 /// composes with every verb ("Delivered ~~name~~" = the tombstone reached

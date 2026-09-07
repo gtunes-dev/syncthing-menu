@@ -1,14 +1,24 @@
 import Foundation
 
 /// Live activity log for the Activity window: an append-only record of the
-/// LOGICAL sync events witnessed while the window is open, newest first.
+/// LOGICAL sync events witnessed while recording, newest first.
 ///
 /// ## Intent
 ///
 /// The window narrates, in real time, the sync lifecycle of every file whose
-/// activity this device witnesses while the window is open — so the person
-/// at the console can answer "what is happening, and did my changes make
-/// it?" Principles (settled 2026-08-17):
+/// activity this device witnesses — so the person at the console can answer
+/// "what is happening, and did my changes make it?" Use cases (Greg,
+/// 2026-09-06 design review — these decide every trade-off below):
+///
+/// - Someone opens the window and WATCHES: specific activity, as it occurs,
+///   not approximations.
+/// - Someone wants to know what happened to ONE file: they type part of its
+///   name and see its activity if it is still in the window. They never
+///   fail to find it because the system collapsed it into a summary.
+/// - Chattiness versus latency, and what to record or show, are the USER's
+///   choices, added as controls later — never the system's.
+///
+/// Principles (settled 2026-08-17, principle 5 rewritten 2026-09-06):
 ///
 /// 1. **Rows are conclusions, not API events.** A log entry states something
 ///    we are prepared to defend ("Muninn has this file now"); several API
@@ -32,34 +42,40 @@ import Foundation
 ///    and has). Inbound "from a replica" is NOT a well-posed question —
 ///    blocks of one file are pulled from every replica that has them — so
 ///    the inbound party is the change's AUTHOR, never a transfer source.
-/// 5. **Narrative granularity matches witnessing granularity — and reading
-///    scale.** Per-item entries at human scale; folder-level BULK entries at
-///    machine scale (a Photos-style churn of thousands), where per-item
-///    events are unreadable AND undetectable (the event ring overflows by
-///    arithmetic). Beginnings and endings always pair at the granularity
-///    the user saw: per-item detected → per-item delivered; a bulk
-///    "N changes" detected → a bulk "N changes" delivered.
+/// 5. **Granularity is per item. Always.** Every witnessed file event is its
+///    own row, at any scale; summarizing is a user option (not yet built),
+///    never a system decision. (The one coalescing that remains is not of
+///    files: a same-batch burst of device/folder pause-resume events — our
+///    own Pause All verb — logs as "N devices"; its subject is the device,
+///    nothing searchable is hidden.) Earlier generations coalesced "machine-scale"
+///    bursts into "N changes" rows on the theory that a wall of rows helps
+///    nobody — the design review of 2026-09-06 rejected that: the reader
+///    decides what helps them, a collapsed row hides activity as it occurs,
+///    and a file inside a summary can never be found by search. The costs
+///    of per-item at scale are the store's job (`EntryLog`, O(1) per row)
+///    and the window's (`windowSize`, a rolling bound the user will own).
 ///
 /// ## The entries
 ///
 /// Each entry is an immutable statement that something HAPPENED — a verb, an
-/// item (or a bulk count), a party, a time. Times are event times, never
-/// re-stamped; there is no "superseded" (a newer change is simply a newer
-/// entry); eviction is plain oldest-first at the cap; entries are immutable
-/// in STATE but enrichable in METADATA (an applied entry gains its author).
+/// item, a party, a time. Times are event times, never re-stamped; there is
+/// no "superseded" (a newer change is simply a newer entry); eviction is
+/// plain oldest-first at the window; entries are immutable in STATE but
+/// enrichable in METADATA (an applied entry gains its author).
 ///
 /// entry kind   | party            | evidence
 /// -------------|------------------|---------------------------------------
-/// detected     | This Mac         | LocalChangeDetected; or recovered BY NAME from LocalIndexUpdated's filenames (the burst backstop — batched, so it survives the ring overflow that eats per-file events); or, as a BULK entry, an over-threshold burst batch / an over-threshold unnamed backstop surplus (small unnamed surpluses are suppressed as slop)
+/// detected     | This Mac         | LocalChangeDetected; or recovered BY NAME from LocalIndexUpdated's filenames (the backstop — batched, so it survives the ring overflow that eats per-file events)
 /// sending      | recipient        | path APPEARS in the device's RemoteDownloadProgress state map
-/// delivered    | recipient        | path DISAPPEARS from the state map + our index shows the device has it; or the path is absent from a COMPLETE remoteneed list; or a folder-level catch-up closes every open loop (per-item AND bulk, at their own granularities); or the quiescence sweep confirms a stale loop
+/// delivered    | recipient        | path DISAPPEARS from the state map + our index shows the device has it; or the path is absent from a COMPLETE remoteneed list; or a folder-level catch-up closes every open loop, per item; or the quiescence sweep confirms a stale loop
 /// downloading  | author (late)    | ItemStarted not finished in the same batch
 /// applied      | author           | ItemFinished ok (RemoteChangeDetected enriches, or creates when unwitnessed)
 /// failed       | author (late)    | ItemFinished with an error
 ///
 /// Same-batch collapse: ItemStarted + ItemFinished landing in ONE poll batch
 /// (the normal case for small files) produce only the finished entry — one
-/// fact, not two rows dated a millisecond apart.
+/// file's fact, not two rows dated a millisecond apart. (This is one file's
+/// start folding into its own end, not cross-file batching.)
 ///
 /// ## Outbound synthesis (there are NO per-item upload events upstream)
 ///
@@ -72,7 +88,8 @@ import Foundation
 /// bounded `/rest/db/file` availability read. Boundaries, all upstream:
 /// single-block files (< ~128 KiB) never appear in progress reports, and
 /// sub-5s transfers fall between ticks — those confirm via remoteneed,
-/// catch-up, or the sweep instead.
+/// catch-up, or the sweep instead. The Detected and Delivered rows are exact
+/// per file; Sending is the best-effort middle.
 ///
 /// **Delivery to ≥1 device closes a loop** (decided 2026-08-17 after a full
 /// case enumeration — do not reopen without new evidence): a Detected entry
@@ -82,11 +99,28 @@ import Foundation
 /// sending→Ada entry gets its delivered→Ada from direct transfer evidence,
 /// ledger or not), and per-replica POSITION is a state question that lives
 /// in Syncthing's own UI (Open Syncthing) — state, not activity, is never
-/// this window's job. The decisive argument against a full per-replica
-/// ledger is the window's own ephemerality: an offline replica's "delivered"
-/// ending could only land if the window happened to be open when that
-/// device eventually returned — a contract the drop-on-close model cannot
-/// keep.
+/// this window's job.
+///
+/// ## The index backstop
+///
+/// LocalIndexUpdated is one BATCHED event per ~1000 index items, so it
+/// survives the ring overflow that eats per-file change events during
+/// churn. Items it reports that we did not witness are changes we never saw
+/// — compared BY NAME against the witnessed-path set, because the event
+/// carries the batch's `filenames`: when complete (count == items),
+/// unwitnessed names become real per-item detected entries. When the names
+/// are truncated or absent, only a count remains, and a count is not
+/// specific activity: it is logged as a diagnostic, never as a row (the
+/// spurious "1 change" rows of 2026-08-17 were exactly this slop rendered
+/// as fact). Recovered entries default to .modified and an unknown item
+/// kind; the real change event, arriving late, corrects both (the daemon
+/// can emit LocalIndexUpdated BEFORE the change events it covers — observed
+/// live 2026-08-18). And the event fires for items we RECEIVE too (docs:
+/// "due to synchronizing one or more items from the cluster or discovering
+/// local changes"): while a folder is pulling, index growth is the pull,
+/// so the backstop stands down, and an inbound event for a path the
+/// backstop already recovered un-fabricates that row (seen live
+/// 2026-09-06 as "Detected 1,000 changes" for an inbound batch).
 ///
 /// ## The quiescence sweep (closing loops when the event was missed)
 ///
@@ -102,6 +136,15 @@ import Foundation
 /// for offline devices, zero cost while no loops are open. The event path
 /// stays primary; a sweep that actually closes something logs the fact.
 ///
+/// ## Boundaries at machine scale (honest omissions, not approximations)
+///
+/// The event ring holds 1000 events per subscription; a pull that outruns
+/// our polling drops events, so some inbound rows go missing and a
+/// Downloading can lose its Applied — the stream logs "missed N events".
+/// The ledger caps open loops (`OutboundLedger.maxTrackedItems`); beyond it
+/// the oldest loop is dropped and its ending omitted. The window evicts the
+/// oldest rows beyond `windowSize`. None of these fabricates a row.
+///
 /// ## Daemon events (the third row family, added 2026-09-04)
 ///
 /// Beyond file facts and recording markers, the log records what happened
@@ -109,7 +152,8 @@ import Foundation
 /// selection test: would someone reading the log later want to know it
 /// happened, and when? Live state stays the menu's job. Recorded: device
 /// and folder pause/resume (a same-batch burst — our own Pause All verb —
-/// coalesces to "N devices"), peers going online/offline, a folder
+/// coalesces to "N devices"; the subject is the device, not a file, so
+/// nothing searchable is hidden), peers going online/offline, a folder
 /// entering `error` (one bounded `db/status` read fetches the text the
 /// event lacks), and the filesystem watcher failing or recovering.
 ///
@@ -123,24 +167,24 @@ import Foundation
 /// schedule and watcher scans land anywhere), "scans that found changes"
 /// fails both ways, FolderScanProgress measures bytes hashed. The one
 /// accurate case — folders with the watcher disabled — is too odd an
-/// ergonomics to ship. Rows we can't vouch for don't belong in the log. Evaluated and skipped, with
-/// reasons, in `.claude/notes` (progress streams, FolderErrors' retry
-/// re-emission, startup events unobservable by a fresh subscription,
-/// network/protocol internals). These rows are gated by the display's own
-/// "folder & device events" switch and hidden under a name search.
+/// ergonomics to ship. Rows we can't vouch for don't belong in the log.
+/// Evaluated and skipped, with reasons, in `.claude/notes` (progress
+/// streams, FolderErrors' retry re-emission, startup events unobservable by
+/// a fresh subscription, network/protocol internals). These rows are gated
+/// by the display's own "folder & device events" switch and hidden under a
+/// name search.
 ///
 /// ## Lifecycle & frugality
 ///
 /// The log holds ACTIVITY WITNESSED WHILE RECORDING — no seeding of any
 /// kind (not history: delivery-blind; not the work queue: backlog is not
 /// activity — standing state of any kind is Syncthing's own UI's job, via
-/// Open Syncthing; the in-window Devices panel that once carried it was
-/// removed 2026-08-18 as undiscoverable and duplicative). Recording runs
-/// while it is WANTED — the policy says always, or the window is open — AND
-/// POSSIBLE — the session has a live endpoint; the long-poll loop
-/// (`EventStream`) exists exactly then, so under the default policy a
-/// closed window is zero cost. Entries survive everything short of an
-/// explicit clear; what a stop drops depends on WHY it stopped:
+/// Open Syncthing). Recording runs while it is WANTED — the policy says
+/// always, or the window is open — AND POSSIBLE — the session has a live
+/// endpoint; the long-poll loop (`EventStream`) exists exactly then, so
+/// under the default policy a closed window is zero cost. Entries survive
+/// everything short of an explicit clear; what a stop drops depends on WHY
+/// it stopped:
 ///
 /// - **Pause** (recording no longer wanted): the daemon keeps syncing while
 ///   nobody watches, so every open loop is stale by construction — a loop
@@ -192,7 +236,7 @@ final class ActivityFeed: ObservableObject {
             // — the inputs re-announce unchanged states — and never paired:
             // a connected may follow a started with no disconnected between
             // (window reopened during an outage, then the daemon returns);
-            // that is the truth. Cap eviction can orphan a marker — accepted.
+            // that is the truth. Window eviction can orphan a marker — accepted.
             case recordingStarted(MarkerReason)
             case recordingPaused(MarkerReason)
             case connected
@@ -205,7 +249,7 @@ final class ActivityFeed: ObservableObject {
             // happened, and when — live state is the menu's job, the log's
             // value is history. The subject rides the Folder or Device
             // column; the Name column carries the statement where there is
-            // one (an error text, a scan duration), else stays blank.
+            // one (an error text), else stays blank.
             case devicePaused              // party = device (or "N devices")
             case deviceResumed
             case folderPaused              // folder = the folder (or "N folders")
@@ -280,7 +324,7 @@ final class ActivityFeed: ObservableObject {
 
         /// A daemon-event entry: the subject in the Folder and/or Device
         /// column, no path. `bulkCount` marks a coalesced burst ("3
-        /// devices") the way it marks bulk file entries.
+        /// devices").
         static func daemonEvent(_ kind: Kind, time: Date, folderID: String = "",
                                 folderLabel: String = "", party: String? = nil,
                                 bulkCount: Int? = nil) -> Entry {
@@ -294,20 +338,19 @@ final class ActivityFeed: ObservableObject {
         let kind: Kind
         let folderID: String
         let folderLabel: String
-        /// Folder-relative path; EMPTY for bulk entries (which summarize a
-        /// count, not an item — and are therefore invisible to name search,
-        /// a documented boundary of the aggregate tier).
+        /// Folder-relative path; EMPTY for markers and daemon events (which
+        /// are not items — and are therefore invisible to name search by
+        /// design).
         let path: String
         /// What happened to the file. Add vs modify is indistinguishable
         /// from the API (both sides report new files as modified/update);
-        /// rename arrives as delete + add (two entries). Bulk entries mix
-        /// operations and carry .modified (so the Deletes-only filter hides
-        /// them — accepted). Enrichable for one reason only: a
-        /// backstop-recovered entry guesses .modified (filenames carry no
-        /// operation) and the real change event, arriving late, corrects it.
+        /// rename arrives as delete + add (two entries). Enrichable for one
+        /// reason only: a backstop-recovered entry guesses .modified
+        /// (filenames carry no operation) and the real change event,
+        /// arriving late, corrects it.
         var operation: Operation
-        /// Machine-scale tier: the number of changes this BULK entry stands
-        /// for. nil = an ordinary single-item entry.
+        /// Daemon events only: how many subjects a coalesced "N devices" /
+        /// "N folders" row stands for. nil for every file row.
         let bulkCount: Int?
         /// Display name of the entry's other party — the author ("This Mac"
         /// for local detections, the originating device for inbound entries;
@@ -317,10 +360,10 @@ final class ActivityFeed: ObservableObject {
         var party: String?
         /// What kind of item this is, from the event's `type`. nil = not
         /// known — only backstop-recovered rows (a filename list carries no
-        /// type) and, by construction, bulk rows. Enrichable: the real
-        /// change event, arriving after a recovery, fills it in. Unknown
-        /// renders as an EMPTY icon slot, never a guess or an "unknown"
-        /// glyph (lag, never lie; no non-data ink).
+        /// type). Enrichable: the real change event, arriving after a
+        /// recovery, fills it in. Unknown renders as an EMPTY icon slot,
+        /// never a guess or an "unknown" glyph (lag, never lie; no non-data
+        /// ink).
         var itemType: ItemType? = nil
 
         enum ItemType: Equatable {
@@ -339,12 +382,9 @@ final class ActivityFeed: ObservableObject {
             }
         }
 
-        /// The Name column's text: the path, except bulk entries summarize
-        /// their count.
+        /// The Name column's text: the path, or a non-file row's statement.
         var displayName: String {
-            if let statement = kind.statement { return statement }
-            guard let bulkCount else { return path }
-            return bulkCount == 1 ? "1 change" : "\(bulkCount.formatted()) changes"
+            kind.statement ?? path
         }
 
         // MARK: Sort keys (display sorting reads these via KeyPathComparator)
@@ -373,30 +413,22 @@ final class ActivityFeed: ObservableObject {
         }
     }
 
+    typealias ItemKey = EntryLog.ItemKey
+
     // MARK: - Published state & tuning
 
-    /// Newest first. Bounded (`maxEntries`) — the window is a recent-activity
-    /// readout, not a log archive.
+    /// Newest first: the display's snapshot of the log, rebuilt at each
+    /// commit. Bounded by `windowSize`.
     @Published private(set) var entries: [Entry] = []
 
-    private static let maxEntries = 500
-    /// The human/machine scale boundary: a poll batch carrying MORE
-    /// detections than this for one folder coalesces into one bulk entry
-    /// instead of a wall of per-item rows (principle 5), and the
-    /// index-update backstop's NAMED recovery aggregates beyond it instead
-    /// of recovering per-item. Generous on purpose — every coalesced item is
-    /// invisible to name search — and bounded only by the row cap
-    /// (`maxEntries`): one batch at the threshold fills a fifth of it.
-    /// Raised 25 → 100 on 2026-09-04 (a 30-item batch collapsing read as
-    /// too eager in use).
-    static let bulkDetectionThreshold = 100
-    /// The backstop's UNNAMED tier: a count-only surplus at or under this is
-    /// suppressed as bookkeeping slop (index batches cover work no per-file
-    /// event we consume describes — the spurious "1 change" rows of
-    /// 2026-08-17); above it the count is real churn and logs in bulk.
-    /// Deliberately separate from `bulkDetectionThreshold` — slop is small
-    /// regardless of how eagerly named changes coalesce.
-    static let unnamedSurplusSuppression = 25
+    /// The window: how many rows the log keeps, and therefore both what the
+    /// user can scroll or search and what the log holds in memory — ONE
+    /// number by decision (2026-09-06), to become a user setting. 5,000 is
+    /// chosen so a human-scale batch (a folder of a couple of thousand
+    /// files, listed per item) does not evict the rest of a day's history
+    /// under always-on recording, while staying trivial in memory (~1 MB)
+    /// and in the per-commit snapshot and the view's sort and search.
+    static let windowSize = 5_000
     /// How long an open loop may wait for its event-driven ending before the
     /// quiescence sweep probes for it. Comfortably past the event cadence
     /// (completion ticks ~2s, progress reports ~5s).
@@ -413,9 +445,12 @@ final class ActivityFeed: ObservableObject {
     /// go stale before their turn.
     private static let deliveryCheckBudget = 20
 
-    /// All stored properties have defaults; nonisolated so the owner (a
-    /// nonisolated app delegate) can create the feed at construction time.
-    nonisolated init() {}
+    /// Nonisolated so the owner (a nonisolated app delegate) can create the
+    /// feed at construction time. `windowSize` is injectable for tests only;
+    /// the app uses the constant.
+    nonisolated init(windowSize: Int = ActivityFeed.windowSize) {
+        log = EntryLog(capacity: windowSize)
+    }
 
     /// Injectable seams (the monitor's established pattern): tests exercise
     /// the retry path and the sweep's staleness clock without real time.
@@ -423,6 +458,42 @@ final class ActivityFeed: ObservableObject {
     var now: () -> Date = Date.init
 
     // MARK: - Private state
+
+    /// The log itself (rows, order, window, per-item index); `entries` is
+    /// its display snapshot.
+    private var log: EntryLog
+
+    /// Rows produced OUTSIDE the batch pipeline: markers (window, policy,
+    /// and session flips) and the fire-and-forget delivery checks'
+    /// confirmations. A batch works on a COPY of the log taken at its start
+    /// and parks on network reads mid-way, so committing straight onto
+    /// `log` while a batch is in flight would be overwritten by that
+    /// batch's commit — the lost-Delivered race (review, 2026-09-07): the
+    /// ledger loop is already closed, so the ending is gone for good. Rule:
+    /// with a batch in flight, out-of-band rows QUEUE and the batch folds
+    /// them in before its commit; with none in flight, markers commit at
+    /// once (their callers read `entries` synchronously) and deliveries
+    /// drain on one scheduled turn (collapsing a burst of checks into one
+    /// snapshot). Queued deliveries belong with their loops: a pause or
+    /// clear flushes them along with the ledger, while a restart or
+    /// disconnect keeps both (the check already closed the loop, so
+    /// dropping the row would lose the ending — re-review, 2026-09-07).
+    /// Markers describe the log's own transitions and always land. Batches
+    /// are COUNTED, not flagged: a cancelled loop's batch can still be
+    /// unwinding when its successor's first batch starts.
+    private var batchesInFlight = 0
+    private var pendingMarkers: [Entry] = []
+    private var pendingDeliveries: [ConfirmedDelivery] = []
+    private var deliveryDrainScheduled = false
+
+    private struct ConfirmedDelivery {
+        let folder: String
+        let path: String
+        let operation: Entry.Operation
+        let itemType: Entry.ItemType?
+        let party: String
+        let time: Date
+    }
 
     private var api: SyncthingAPI?
     private var windowVisible = false
@@ -433,12 +504,14 @@ final class ActivityFeed: ObservableObject {
     /// a flip to off is what flushes the open loops (a pause).
     private var isDesired = false
     private var stream: EventStream<SyncthingAPI.ActivityEvent>?
-    /// Bumped whenever the log is replaced from outside the batch pipeline
-    /// (loop start/stop, clear). A batch parks on network awaits mid-way and
-    /// commits a snapshot taken at its start; it commits only if the epoch
-    /// it started under is still current, so a pause or clear landing while
-    /// a batch is parked is never overwritten by that batch. The same guard
-    /// retires the fire-and-forget delivery checks of a stopped loop.
+    /// Bumped whenever the log is INVALIDATED from outside the batch
+    /// pipeline (loop start/stop, clear). A batch parks on network awaits
+    /// mid-way and commits a working copy taken at its start; it commits
+    /// only if the epoch it started under is still current, so a pause or
+    /// clear landing while a batch is parked is never overwritten by that
+    /// batch. The same guard retires the fire-and-forget delivery checks of
+    /// a stopped loop. Markers do NOT bump it — they append, and go through
+    /// the out-of-band queue instead (see `pendingMarkers`).
     private var logEpoch = 0
 
     // Identity tables (refreshed at loop start and on ConfigSaved).
@@ -474,28 +547,23 @@ final class ActivityFeed: ObservableObject {
     private var pendingDeliveryChecks: [DeliveryCheck] = []
     /// Per-folder PATHS witnessed since that folder's last LocalIndexUpdated
     /// — the backstop's baseline, by name: index items we did not witness
-    /// are recovered as named detections (small gaps) or a bulk entry (large
-    /// ones). Bounded: cleared at every index event, which the daemon emits
-    /// at least once per ~1000 items.
+    /// are recovered as named detections. Bounded: cleared at every index
+    /// event, which the daemon emits at least once per ~1000 items.
     private var witnessedSinceIndexUpdate: [String: Set<String>] = [:]
     /// Per-folder sweep throttle (`sweepMinInterval`).
     private var lastSweep: [String: Date] = [:]
     /// Paths whose detected entry came from backstop RECOVERY, awaiting the
-    /// real change event: LocalChangeDetected consumes the marker instead of
-    /// logging a duplicate (the daemon can emit LocalIndexUpdated BEFORE the
-    /// change events it covers — observed live 2026-08-18 as doubled
-    /// detected rows). Markers for a folder are cleared at its next index
-    /// event, so a marker never outlives one index cycle and a genuinely
-    /// new later change always logs.
+    /// real event: LocalChangeDetected consumes the marker and corrects the
+    /// entry instead of logging a duplicate; an INBOUND event consumes it
+    /// and removes the entry (the index growth was a pull). Markers for a
+    /// folder are cleared at its next index event, so a marker never
+    /// outlives one index cycle and a genuinely new later change always
+    /// logs.
     private var recoveredDetections: Set<ItemKey> = []
-    /// The bulk-tier twin of `recoveredDetections`: when the backstop
-    /// recovers a folder's changes IN BULK (index event first, at scale),
-    /// the change events that follow are the same changes — each consumes
-    /// one from this budget instead of logging, or the burst would
-    /// coalesce into a second identical "N changes" row (seen live
-    /// 2026-09-04). Retired at the folder's next index cycle, like the
-    /// per-item markers.
-    private var recoveredBulkBudget: [String: Int] = [:]
+    /// Folders currently in a syncing state per StateChanged (not seeded):
+    /// the backstop stands down for them.
+    private var syncingFolders: Set<String> = []
+    private static let syncingStates: Set<String> = ["syncing", "sync-preparing", "sync-waiting"]
 
     private struct TransferKey: Hashable {
         let folder: String
@@ -507,11 +575,6 @@ final class ActivityFeed: ObservableObject {
         let path: String
         let device: String   // full id
         let time: Date       // the disappearance event's time
-    }
-
-    private struct ItemKey: Hashable {
-        let folder: String
-        let path: String
     }
 
     // MARK: - Recording lifecycle
@@ -582,11 +645,17 @@ final class ActivityFeed: ObservableObject {
         }
     }
 
-    /// Markers land outside the batch pipeline, so they advance the epoch:
-    /// a batch parked mid-await must not commit over them.
+    /// Markers land outside the batch pipeline (see `pendingMarkers`): a
+    /// parked batch folds them in; otherwise they commit at once.
     private func appendMarker(_ kind: Entry.Kind) {
-        logEpoch += 1
-        commit([Entry.marker(kind, time: now())] + entries)
+        let marker = Entry.marker(kind, time: now())
+        if batchesInFlight > 0 {
+            pendingMarkers.append(marker)
+        } else {
+            var updated = log
+            updated.append(marker)
+            commit(updated)
+        }
     }
 
     /// The user's Clear: empty the log and flush the open loops (a cleared
@@ -596,7 +665,9 @@ final class ActivityFeed: ObservableObject {
     /// dropped (epoch).
     func clear() {
         logEpoch += 1
+        log.removeAll()
         entries = []
+        pendingMarkers = []   // a transition queued before the clear belongs to the cleared log
         flushOpenLoops()
     }
 
@@ -611,11 +682,12 @@ final class ActivityFeed: ObservableObject {
     private func flushOpenLoops() {
         ledger.removeAll()
         pendingDeliveryChecks = []
+        pendingDeliveries = []   // confirmed endings for loops that no longer exist
         reportedDownloads = [:]
         witnessedSinceIndexUpdate = [:]
         recoveredDetections = []
-        recoveredBulkBudget = [:]
         lastSweep = [:]
+        syncingFolders = []
     }
 
     // MARK: - The event loop
@@ -632,7 +704,6 @@ final class ActivityFeed: ObservableObject {
             fetch: { try await api.activityEvents(since: $0, timeout: $1, limit: $2) },
             seed: { [weak self] in
                 guard let self else { return }
-                try await self.refreshIdentity(api: api)
                 // A (re)seed means the stream (re)started: per-tick state is
                 // unknowable across the gap. Open LOOPS stay — the sweep and
                 // the confirmation queries are computed against live truth,
@@ -641,7 +712,8 @@ final class ActivityFeed: ObservableObject {
                 self.reportedDownloads = [:]
                 self.witnessedSinceIndexUpdate = [:]
                 self.recoveredDetections = []
-                self.recoveredBulkBudget = [:]
+                self.syncingFolders = []
+                try await self.refreshIdentity(api: api)   // also seeds syncingFolders
                 // Deliberately NO entry seeding — the window renders
                 // witnessed activity only (see the class doc).
             },
@@ -683,6 +755,16 @@ final class ActivityFeed: ObservableObject {
                 && !(folderSharers[folder.id]?.isEmpty ?? true)
         }.map(\.id))
         connectedIDs = (try? await api.connectedDevices()) ?? []
+        // Folders already pulling when the loop starts: the backstop must
+        // stand down for them from the first index event, not from the next
+        // syncing transition (review finding, 2026-09-07). One small read
+        // per folder, tolerant — an unreadable (paused) folder is not syncing.
+        for folder in folders where !(folder.paused ?? false) {
+            if let state = try? await api.folderState(id: folder.id),
+               Self.syncingStates.contains(state) {
+                syncingFolders.insert(folder.id)
+            }
+        }
     }
 
     // MARK: - Batch processing
@@ -691,19 +773,13 @@ final class ActivityFeed: ObservableObject {
     /// copy of the log plus the batch-scoped context the individual event
     /// handlers need.
     private struct BatchContext {
-        var entries: [Entry]
+        var log: EntryLog
         /// Downloading entries created in THIS batch, so a finish arriving
         /// moments later collapses with its start (same-batch collapse).
         var startedThisBatch: [ItemKey: UUID] = [:]
         /// (folder, device) pairs whose FolderCompletion moved this batch —
         /// the remoteneed confirmation cue, deduped per batch.
         var deliveryTriggers: [TransferKey: Date] = [:]
-        /// Folders whose detections this batch crossed `bulkDetectionThreshold`
-        /// — their detections coalesce instead of logging per-item.
-        var bulkFolders: Set<String> = []
-        /// folder → coalesced detection count + a representative time; one
-        /// bulk detected entry per folder is emitted after the event loop.
-        var bulkDetected: [String: (count: Int, time: Date)] = [:]
         var sawConfigChange = false
         /// Pause/resume events this batch, by kind — a burst (Pause All)
         /// coalesces to one "N devices" / "N folders" row.
@@ -728,39 +804,48 @@ final class ActivityFeed: ObservableObject {
     /// One wake of the stream (`handle` runs on EVERY wake, including empty
     /// ~50s timeouts — which is what lets the sweep ride the wakes). The
     /// pipeline, in order:
-    /// 1. scale partition — folders whose detections exceed the bulk threshold
-    /// 2. per-event application (entries, ledger, triggers)
-    /// 3. bulk detected entries for the coalesced folders
-    /// 4. remoteneed confirmations for this batch's completion triggers
-    /// 5. the quiescence sweep, if any open loop has gone stale
-    /// 6. commit, then the fire-and-forget availability checks
-    /// 7. housekeeping: identity refresh when ConfigSaved arrived
+    /// 1. per-event application (rows, ledger, triggers)
+    /// 2. the batch's coalesced daemon-event rows and folder-error reads
+    /// 3. remoteneed confirmations for this batch's completion triggers
+    /// 4. the quiescence sweep, if any open loop has gone stale
+    /// 5. commit, then the fire-and-forget availability checks
+    /// 6. housekeeping: identity refresh when ConfigSaved arrived
     private func handleBatch(_ events: [SyncthingAPI.ActivityEvent],
                              api: SyncthingAPI) async {
         let epoch = logEpoch
-        var context = BatchContext(entries: entries)
-        var detectionCounts: [String: Int] = [:]
-        for event in events where event.type == "LocalChangeDetected" {
-            if let folder = event.folder { detectionCounts[folder, default: 0] += 1 }
-        }
-        context.bulkFolders = Set(detectionCounts.filter {
-            $0.value > Self.bulkDetectionThreshold
-        }.keys)
+        batchesInFlight += 1
+        var context = BatchContext(log: log)
 
+        // NOTE: the per-event handlers write ROWS to the working copy but
+        // their bookkeeping (ledger, witnessed/recovered sets, connected
+        // ids, transfer baselines, delivery-check queue) straight to self.
+        // A batch dropped by the epoch guard therefore leaves that
+        // bookkeeping ahead of the log. The drop paths are pause and clear
+        // (which flush all of it) and a loop restart on a session republish
+        // (whose reseed clears the per-tick state; the ledger may then hold
+        // loops whose detected row never landed — they close as delivered
+        // rows without a beginning, a settled fact, and connected-set flips
+        // are re-read at seed). Accepted rather than copying a 100k-loop
+        // ledger per batch (review, 2026-09-07).
         for event in events {
             apply(event, to: &context)
         }
-        logBulkDetections(&context)
         logStateChanges(&context)
         await logFolderErrors(&context, api: api)
-        await confirmDeliveries(context.deliveryTriggers, api: api,
-                                entries: &context.entries)
-        await sweepStaleLoops(api: api, entries: &context.entries)
+        await confirmDeliveries(context.deliveryTriggers, api: api, log: &context.log)
+        await sweepStaleLoops(api: api, log: &context.log)
+        batchesInFlight -= 1
         // The awaits above parked this batch; if the log was replaced
-        // underneath (pause, clear, loop restart) its snapshot is stale —
-        // drop it rather than overwrite what happened meanwhile.
-        guard logEpoch == epoch else { return }
-        commit(context.entries)
+        // underneath (pause, clear, loop restart) its working copy is stale
+        // — drop it rather than overwrite what happened meanwhile. Rows
+        // queued meanwhile still need a home (a pause or clear has already
+        // flushed the deliveries it invalidated).
+        guard logEpoch == epoch else {
+            drainPendingRows()
+            return
+        }
+        foldPendingRows(into: &context.log)
+        commit(context.log)
         resolvePendingDeliveryChecks(api: api)
 
         if context.sawConfigChange {
@@ -793,16 +878,14 @@ final class ActivityFeed: ObservableObject {
             // rows), so the row follows the device-level FLIP of our set.
             guard let device = event.device, device != myID else { return }
             guard connectedIDs.insert(device).inserted else { return }
-            context.entries.insert(Entry.daemonEvent(.deviceOnline, time: event.time,
-                                                     party: displayName(forFullID: device)),
-                                   at: 0)
+            context.log.append(Entry.daemonEvent(.deviceOnline, time: event.time,
+                                                 party: displayName(forFullID: device)))
             return
         case "DeviceDisconnected":
             guard let device = event.device, device != myID else { return }
             guard connectedIDs.remove(device) != nil else { return }
-            context.entries.insert(Entry.daemonEvent(.deviceOffline, time: event.time,
-                                                     party: displayName(forFullID: device)),
-                                   at: 0)
+            context.log.append(Entry.daemonEvent(.deviceOffline, time: event.time,
+                                                 party: displayName(forFullID: device)))
             return
         case "DevicePaused", "DeviceResumed":
             guard let device = event.device, device != myID else { return }
@@ -833,18 +916,22 @@ final class ActivityFeed: ObservableObject {
             if event.to == "error" {
                 context.errorFolders.append((folder, event.time))
             }
+            // Syncing transitions gate the index backstop (class doc).
+            if let to = event.to, Self.syncingStates.contains(to) {
+                syncingFolders.insert(folder)
+            } else if event.to == "idle" {
+                syncingFolders.remove(folder)
+            }
             return
         case "FolderWatchStateChanged":
             guard let folder = event.folder else { return }
             let label = folderLabel(for: folder)
             if let text = event.to, !text.isEmpty {
-                context.entries.insert(Entry.daemonEvent(.watchFailed(text), time: event.time,
-                                                         folderID: folder, folderLabel: label),
-                                       at: 0)
+                context.log.append(Entry.daemonEvent(.watchFailed(text), time: event.time,
+                                                     folderID: folder, folderLabel: label))
             } else if let previous = event.from, !previous.isEmpty {
-                context.entries.insert(Entry.daemonEvent(.watchRestored, time: event.time,
-                                                         folderID: folder, folderLabel: label),
-                                       at: 0)
+                context.log.append(Entry.daemonEvent(.watchRestored, time: event.time,
+                                                     folderID: folder, folderLabel: label))
             }
             return
         default:
@@ -857,98 +944,96 @@ final class ActivityFeed: ObservableObject {
         let isDelete = event.action == "delete" || event.action == "deleted"
         let operation: Entry.Operation = isDelete ? .deleted : .modified
         let itemType = Entry.ItemType(apiType: event.itemKind)
+        // Every item event witnesses its name for the index backstop: local
+        // changes AND inbound items (our index grows from pulls too).
+        witnessedSinceIndexUpdate[folder, default: []].insert(path)
+
+        if event.type != "LocalChangeDetected", recoveredDetections.remove(key) != nil {
+            // An inbound item the backstop ALREADY recovered as a local
+            // detection — index event first, pull second: un-fabricate it.
+            // The row and its outbound loop describe a change that never
+            // happened here.
+            if let row = context.log.newest(for: key), row.kind == .detected,
+               row.party == "This Mac" {
+                context.log.remove(id: row.id)
+            }
+            _ = ledger.closeItem(folder: folder, path: path)
+        }
 
         switch event.type {
         case "LocalChangeDetected":
-            witnessedSinceIndexUpdate[folder, default: []].insert(path)
             // The backstop already logged this change (recovery from an
             // index event that arrived first): consume the marker — the
             // entry exists, a second would be a duplicate of the same fact.
-            // But the recovery GUESSED .modified, and this event knows the
-            // truth — correct the entry and the open loop, or a real delete
-            // renders as a modify all the way through delivery (regressed
-            // and caught live 2026-08-18).
+            // But the recovery GUESSED .modified and knew no item kind; this
+            // event knows both — correct the entry and the open loop, or a
+            // real delete renders as a modify all the way through delivery
+            // (regressed and caught live 2026-08-18).
             if recoveredDetections.remove(key) != nil {
-                // Enrich, don't duplicate: the recovery guessed .modified
-                // and knew no item kind; this event knows both.
-                if let index = context.entries.firstIndex(where: {
-                    $0.kind == .detected && $0.folderID == folder && $0.path == path
-                }) {
-                    context.entries[index].operation = operation
-                    context.entries[index].itemType = itemType
+                if let row = context.log.newest(for: key), row.kind == .detected {
+                    context.log.update(id: row.id) {
+                        $0.operation = operation
+                        $0.itemType = itemType
+                    }
                 }
                 ledger.annotate(folder: folder, path: path, operation: operation,
                                 itemType: itemType)
                 return
             }
-            // The bulk twin: this change was already counted by a bulk
-            // recovery (index event first, at scale) — consume, don't log.
-            if let budget = recoveredBulkBudget[folder], budget > 0 {
-                recoveredBulkBudget[folder] = budget - 1
-                return
-            }
-            if context.bulkFolders.contains(folder) {
-                // Machine scale: coalesce (logBulkDetections emits the entry).
-                var bulk = context.bulkDetected[folder] ?? (count: 0, time: event.time)
-                bulk.count += 1
-                bulk.time = event.time
-                context.bulkDetected[folder] = bulk
-            } else {
-                context.entries.insert(Entry(time: event.time, kind: .detected,
-                                             folderID: folder, folderLabel: label,
-                                             path: path, operation: operation,
-                                             bulkCount: nil, party: "This Mac",
-                                             itemType: itemType), at: 0)
-                // A loop opens only where delivery is possible in principle
-                // (principle 3): on a receive-only or unshared folder the
-                // detected entry stands alone — opening a loop there would
-                // synthesize a false "delivered" the moment a remote reads
-                // completion 100.
-                if deliverableFolders.contains(folder) {
-                    ledger.track(folder: folder, path: path, operation: operation,
-                                 itemType: itemType, at: now())
-                }
+            context.log.append(Entry(time: event.time, kind: .detected,
+                                     folderID: folder, folderLabel: label,
+                                     path: path, operation: operation,
+                                     bulkCount: nil, party: "This Mac",
+                                     itemType: itemType))
+            // A loop opens only where delivery is possible in principle
+            // (principle 3): on a receive-only or unshared folder the
+            // detected entry stands alone — opening a loop there would
+            // synthesize a false "delivered" the moment a remote reads
+            // completion 100.
+            if deliverableFolders.contains(folder) {
+                ledger.track(folder: folder, path: path, operation: operation,
+                             itemType: itemType, at: now())
             }
 
         case "ItemStarted":
+            // A second start for the same item in one batch (a retry with
+            // no finish between) replaces the first: one in-flight row.
+            if let earlier = context.startedThisBatch[key] {
+                context.log.remove(id: earlier)
+            }
             let entry = Entry(time: event.time, kind: .downloading, folderID: folder,
                               folderLabel: label, path: path, operation: operation,
                               bulkCount: nil, party: nil, itemType: itemType)
-            context.entries.insert(entry, at: 0)
+            context.log.append(entry)
             context.startedThisBatch[key] = entry.id
 
         case "ItemFinished":
-            // Applied items advance the local index too — witnessing them by
-            // name keeps them out of the backstop's unwitnessed set.
-            witnessedSinceIndexUpdate[folder, default: []].insert(path)
             let kind: Entry.Kind = event.error.map { .failed($0) } ?? .applied
             // Same-batch collapse: replace the start logged moments ago
             // rather than keeping both halves of one sub-batch fact.
             if let startID = context.startedThisBatch.removeValue(forKey: key) {
-                context.entries.removeAll { $0.id == startID }
+                context.log.remove(id: startID)
             }
-            context.entries.insert(Entry(time: event.time, kind: kind, folderID: folder,
-                                         folderLabel: label, path: path,
-                                         operation: operation, bulkCount: nil,
-                                         party: nil, itemType: itemType), at: 0)
+            context.log.append(Entry(time: event.time, kind: kind, folderID: folder,
+                                     folderLabel: label, path: path,
+                                     operation: operation, bulkCount: nil,
+                                     party: nil, itemType: itemType))
 
         case "RemoteChangeDetected":
             let author = event.modifiedBy.map { deviceNames[$0] ?? $0 }
             // The commit event names the author — enrich the applied entry
             // still awaiting one (metadata enrichment, never a state change).
-            if let index = context.entries.firstIndex(where: {
-                $0.kind == .applied && $0.folderID == folder && $0.path == path
-                    && $0.party == nil
-            }) {
-                context.entries[index].party = author
+            if let row = context.log.newest(for: key), row.kind == .applied,
+               row.party == nil {
+                context.log.update(id: row.id) { $0.party = author }
             } else {
                 // A commit with no witnessed apply (e.g. subscription started
                 // mid-apply): still a real, settled inbound change.
-                context.entries.insert(Entry(time: event.time, kind: .applied,
-                                             folderID: folder, folderLabel: label,
-                                             path: path, operation: operation,
-                                             bulkCount: nil, party: author,
-                                             itemType: itemType), at: 0)
+                context.log.append(Entry(time: event.time, kind: .applied,
+                                         folderID: folder, folderLabel: label,
+                                         path: path, operation: operation,
+                                         bulkCount: nil, party: author,
+                                         itemType: itemType))
             }
 
         default:
@@ -976,16 +1061,16 @@ final class ActivityFeed: ObservableObject {
 
         let party = displayName(forFullID: device)
         let label = folderLabel(for: folder)
-        // Sorted (then reversed, since each insert lands on top) so a burst
-        // of appearances logs in deterministic path order.
+        // Reverse-sorted so the newest-first display shows a burst of
+        // appearances in path order.
         for path in reported.subtracting(previous).sorted().reversed() {
             // Always a FILE: directories and symlinks have no blocks and never
             // appear in a progress report — they go detected → delivered.
-            context.entries.insert(Entry(time: event.time, kind: .sending,
-                                         folderID: folder, folderLabel: label,
-                                         path: path, operation: .modified,
-                                         bulkCount: nil, party: party,
-                                         itemType: .file), at: 0)
+            context.log.append(Entry(time: event.time, kind: .sending,
+                                     folderID: folder, folderLabel: label,
+                                     path: path, operation: .modified,
+                                     bulkCount: nil, party: party,
+                                     itemType: .file))
             ledger.track(folder: folder, path: path, operation: .modified,
                          itemType: .file, at: now())
         }
@@ -1003,17 +1088,15 @@ final class ActivityFeed: ObservableObject {
         else { return }
         if isFullCatchUp(event) {
             // The device needs NOTHING: every open loop in the folder is
-            // confirmed — per-item loops individually (the person at the
-            // console needs WHICH items completed, not "caught up"), the
-            // bulk loop as one bulk delivered entry. needDeletes must be
-            // zero too: a deletes-only backlog can report completion 100
-            // with tombstones still undelivered.
-            if let closure = ledger.closeFolder(folder) {
-                logClosure(closure, folder: folder,
-                           party: displayName(forFullID: device),
-                           time: event.time, into: &context.entries)
-                Log.monitor.log("activity catch-up: \(closure.items.count) items + \(closure.bulkCount) bulk confirmed by \(device.prefix(7), privacy: .public)")
-            }
+            // confirmed, per item (the person at the console needs WHICH
+            // items completed, not "caught up"). needDeletes must be zero
+            // too: a deletes-only backlog can report completion 100 with
+            // tombstones still undelivered.
+            let closed = ledger.closeFolder(folder)
+            guard !closed.isEmpty else { return }
+            logClosure(closed, folder: folder, party: displayName(forFullID: device),
+                       time: event.time, into: &context.log)
+            Log.monitor.log("activity catch-up: \(closed.count) items confirmed by \(device.prefix(7), privacy: .public)")
         } else {
             // Partial progress: cue for one bounded remoteneed read.
             context.deliveryTriggers[TransferKey(folder: folder, device: device)]
@@ -1025,73 +1108,34 @@ final class ActivityFeed: ObservableObject {
         event.completion == 100 && event.needItems == 0 && (event.needDeletes ?? 0) == 0
     }
 
-    // MARK: - Outbound: the bulk tier (machine-scale evidence)
+    // MARK: - The index backstop
 
-    /// LocalIndexUpdated is the burst backstop: one BATCHED event per ~1000
-    /// index items, so it survives the ring overflow that eats per-file
-    /// events during machine-scale churn. Items it reports that we did not
-    /// witness are changes we never saw — and the comparison is BY NAME
-    /// against the witnessed-path set, because the event carries the batch's
-    /// `filenames`:
-    /// - filenames complete (count == items): unwitnessed names become real
-    ///   per-item detected entries — a missed change gets its NAME, not a
-    ///   "1 change" row — unless there are more than the bulk threshold, in
-    ///   which case the same scale rule as burst batches applies (one bulk
-    ///   entry).
-    /// - filenames truncated or absent: only the count is trustworthy, and
-    ///   only at scale — a numeric surplus above the threshold logs a bulk
-    ///   entry; a small unnamed surplus is SUPPRESSED (indistinguishable
-    ///   from bookkeeping slop — index batches cover things no per-file
-    ///   event we consume describes — and principle 2 degrades by omission,
-    ///   never by a vague claim). This suppression is what killed the
-    ///   spurious "1 change" rows seen live 2026-08-17.
-    /// Recovered entries default to .modified: the filenames say nothing
-    /// about the operation (a recovered tombstone renders as a modify —
-    /// accepted).
+    /// See the class doc, "The index backstop": named recovery of index items
+    /// we did not witness, per item; counts alone are diagnostics; stands
+    /// down while the folder pulls.
     private func applyIndexUpdateBackstop(_ event: SyncthingAPI.ActivityEvent,
                                           to context: inout BatchContext) {
         guard let folder = event.folder, let items = event.items else { return }
         let witnessed = witnessedSinceIndexUpdate.removeValue(forKey: folder) ?? []
         // A new index cycle: change events covered by the PREVIOUS cycle
         // have long since arrived, so unconsumed recovery markers are
-        // genuinely-lost events — retire them (their entries stand). The
-        // bulk budget retires the same way.
+        // genuinely-lost events — retire them (their entries stand).
         recoveredDetections = recoveredDetections.filter { $0.folder != folder }
-        recoveredBulkBudget[folder] = nil
+        // While the folder is pulling, index growth IS the pull (class doc).
+        guard !syncingFolders.contains(folder) else { return }
 
         if let filenames = event.filenames, filenames.count == items {
             let unwitnessed = filenames.filter { !witnessed.contains($0) }
             guard !unwitnessed.isEmpty else { return }
-            if unwitnessed.count > Self.bulkDetectionThreshold {
-                addBulkDetections(count: unwitnessed.count, folder: folder,
-                                  time: event.time, to: &context)
-            } else {
-                recoverDetections(unwitnessed, folder: folder, time: event.time,
-                                  to: &context)
-            }
+            recoverDetections(unwitnessed, folder: folder, time: event.time, to: &context)
             Log.monitor.log("activity backstop: \(unwitnessed.count) unwitnessed changes recovered by name")
         } else {
+            // Count only — not specific activity. A diagnostic, never a row.
             let surplus = items - witnessed.count
-            guard surplus > 0 else { return }
-            guard surplus > Self.unnamedSurplusSuppression else {
-                Log.monitor.log("activity backstop: \(surplus) unnamed surplus items suppressed")
-                return
+            if surplus > 0 {
+                Log.monitor.log("activity backstop: \(surplus) unnamed surplus items (not logged)")
             }
-            addBulkDetections(count: surplus, folder: folder, time: event.time,
-                              to: &context)
-            Log.monitor.log("activity backstop: \(surplus) unwitnessed changes recorded in bulk")
         }
-    }
-
-    /// Backstop-only: a bulk recovery also funds the budget the folder's
-    /// late-arriving change events will consume (see `recoveredBulkBudget`).
-    private func addBulkDetections(count: Int, folder: String, time: Date,
-                                   to context: inout BatchContext) {
-        var bulk = context.bulkDetected[folder] ?? (count: 0, time: time)
-        bulk.count += count
-        bulk.time = time
-        context.bulkDetected[folder] = bulk
-        recoveredBulkBudget[folder, default: 0] += count
     }
 
     /// Log per-item detected entries for names the backstop recovered.
@@ -1104,35 +1148,15 @@ final class ActivityFeed: ObservableObject {
                                    to context: inout BatchContext) {
         let label = folderLabel(for: folder)
         for path in paths.sorted().reversed() {
-            if let newest = context.entries.first(where: {
-                $0.folderID == folder && $0.path == path
-            }), newest.kind == .detected { continue }
-            context.entries.insert(Entry(time: time, kind: .detected, folderID: folder,
-                                         folderLabel: label, path: path,
-                                         operation: .modified, bulkCount: nil,
-                                         party: "This Mac"), at: 0)
-            recoveredDetections.insert(ItemKey(folder: folder, path: path))
+            let key = ItemKey(folder: folder, path: path)
+            if let newest = context.log.newest(for: key), newest.kind == .detected { continue }
+            context.log.append(Entry(time: time, kind: .detected, folderID: folder,
+                                     folderLabel: label, path: path,
+                                     operation: .modified, bulkCount: nil,
+                                     party: "This Mac"))
+            recoveredDetections.insert(key)
             if deliverableFolders.contains(folder) {
                 ledger.track(folder: folder, path: path, operation: .modified, at: now())
-            }
-        }
-    }
-
-    /// Emit one bulk detected entry per coalesced folder (threshold bursts +
-    /// backstop surpluses accumulated by this batch) and open the matching
-    /// bulk loop — subject to the same delivery-expectation gate as
-    /// per-item loops.
-    private func logBulkDetections(_ context: inout BatchContext) {
-        for (folder, bulk) in context.bulkDetected.sorted(by: { $0.key < $1.key })
-        where bulk.count > 0 {
-            context.entries.insert(Entry(time: bulk.time, kind: .detected,
-                                         folderID: folder,
-                                         folderLabel: folderLabel(for: folder),
-                                         path: "", operation: .modified,
-                                         bulkCount: bulk.count, party: "This Mac"),
-                                   at: 0)
-            if deliverableFolders.contains(folder) {
-                ledger.addBulk(folder: folder, count: bulk.count, at: now())
             }
         }
     }
@@ -1145,7 +1169,7 @@ final class ActivityFeed: ObservableObject {
     /// tracked; skips silently on query failure or a truncated list (loops
     /// stay open for the catch-up or the sweep — lag, never lie).
     private func confirmDeliveries(_ triggers: [TransferKey: Date],
-                                   api: SyncthingAPI, entries: inout [Entry]) async {
+                                   api: SyncthingAPI, log: inout EntryLog) async {
         for (key, time) in triggers {
             guard ledger.hasTrackedItems(in: key.folder) else { continue }
             guard let need = try? await api.remoteNeed(folder: key.folder,
@@ -1153,12 +1177,8 @@ final class ActivityFeed: ObservableObject {
                   need.complete else { continue }
             let closed = ledger.closeItems(in: key.folder, absentFrom: need.needed)
             guard !closed.isEmpty else { continue }
-            let party = displayName(forFullID: key.device)
-            for (path, item) in closed.reversed() {
-                insertDelivered(folder: key.folder, path: path,
-                                operation: item.operation, itemType: item.itemType, party: party,
-                                time: time, into: &entries)
-            }
+            logClosure(closed, folder: key.folder, party: displayName(forFullID: key.device),
+                       time: time, into: &log)
             Log.monitor.log("activity remoteneed: \(closed.count) deliveries confirmed by \(key.device.prefix(7), privacy: .public)")
         }
     }
@@ -1169,7 +1189,7 @@ final class ActivityFeed: ObservableObject {
     /// device closes everything, partial progress falls back to remoteneed
     /// for per-item closure. Runs on the wakes the stream already makes;
     /// costs nothing while no loops are open or none is stale.
-    private func sweepStaleLoops(api: SyncthingAPI, entries: inout [Entry]) async {
+    private func sweepStaleLoops(api: SyncthingAPI, log: inout EntryLog) async {
         let staleFolders = ledger.folders(
             withLoopsOlderThan: now().addingTimeInterval(-Self.sweepAfter))
         guard !staleFolders.isEmpty else { return }
@@ -1189,26 +1209,23 @@ final class ActivityFeed: ObservableObject {
                                                                  device: device)
                 else { continue }
                 if completion.needItems == 0 && completion.needDeletes == 0 {
-                    if let closure = ledger.closeFolder(folder) {
-                        logClosure(closure, folder: folder,
+                    let closed = ledger.closeFolder(folder)
+                    if !closed.isEmpty {
+                        logClosure(closed, folder: folder,
                                    party: displayName(forFullID: device),
-                                   time: now(), into: &entries)
-                        Log.monitor.log("activity sweep: closed \(closure.items.count) items + \(closure.bulkCount) bulk — \(device.prefix(7), privacy: .public) caught up")
+                                   time: now(), into: &log)
+                        Log.monitor.log("activity sweep: closed \(closed.count) items — \(device.prefix(7), privacy: .public) caught up")
                     }
                     break   // folder fully closed; no more probing needed
                 } else if ledger.hasTrackedItems(in: folder),
                           let need = try? await api.remoteNeed(folder: folder,
                                                                device: device),
                           need.complete {
-                    let closed = ledger.closeItems(in: folder,
-                                                   absentFrom: need.needed)
+                    let closed = ledger.closeItems(in: folder, absentFrom: need.needed)
                     guard !closed.isEmpty else { continue }
-                    let party = displayName(forFullID: device)
-                    for (path, item) in closed.reversed() {
-                        insertDelivered(folder: folder, path: path,
-                                        operation: item.operation, itemType: item.itemType, party: party,
-                                        time: now(), into: &entries)
-                    }
+                    logClosure(closed, folder: folder,
+                               party: displayName(forFullID: device),
+                               time: now(), into: &log)
                     Log.monitor.log("activity sweep: \(closed.count) deliveries confirmed by \(device.prefix(7), privacy: .public)")
                 }
             }
@@ -1232,21 +1249,55 @@ final class ActivityFeed: ObservableObject {
                       status.availableOn.contains(check.device),
                       self.logEpoch == epoch else { return }   // loop still current
                 let item = self.ledger.closeItem(folder: check.folder, path: check.path)
-                var updated = self.entries
-                self.insertDelivered(folder: check.folder, path: check.path,
-                                     operation: item?.operation ?? .modified,
-                                     itemType: item?.itemType ?? .file,   // a transfer: a file
-                                     party: self.displayName(forFullID: check.device),
-                                     time: check.time, into: &updated)
-                self.commit(updated)
+                // Never straight onto the log (see `pendingDeliveries`).
+                self.enqueueDelivery(ConfirmedDelivery(
+                    folder: check.folder, path: check.path,
+                    operation: item?.operation ?? .modified,
+                    itemType: item?.itemType ?? .file,   // a transfer: a file
+                    party: self.displayName(forFullID: check.device),
+                    time: check.time))
             }
         }
     }
 
-    /// Convert one folder closure into log entries: per-item delivered
-    /// entries for the loops we tracked by name, one bulk delivered entry
-    /// for the count-only loop — endings at the same granularity as their
-    /// beginnings (principle 5).
+    // MARK: - Out-of-band rows (markers, confirmed deliveries)
+
+    private func enqueueDelivery(_ delivery: ConfirmedDelivery) {
+        pendingDeliveries.append(delivery)
+        guard batchesInFlight == 0, !deliveryDrainScheduled else { return }
+        // One turn later: a burst of checks resolving together becomes one
+        // snapshot instead of one per check.
+        deliveryDrainScheduled = true
+        Task { @MainActor in
+            self.deliveryDrainScheduled = false
+            self.drainPendingRows()
+        }
+    }
+
+    /// Fold queued rows into the live log and publish — only when no batch
+    /// is in flight (a batch folds them itself before its commit).
+    private func drainPendingRows() {
+        guard batchesInFlight == 0, !(pendingMarkers.isEmpty && pendingDeliveries.isEmpty)
+        else { return }
+        var updated = log
+        foldPendingRows(into: &updated)
+        commit(updated)
+    }
+
+    /// Everything queued lands (pause and clear flush the delivery queue
+    /// with the ledger; nothing else invalidates a confirmed delivery).
+    private func foldPendingRows(into log: inout EntryLog) {
+        for marker in pendingMarkers { log.append(marker) }
+        pendingMarkers = []
+        let deliveries = pendingDeliveries
+        pendingDeliveries = []
+        for delivery in deliveries {
+            insertDelivered(folder: delivery.folder, path: delivery.path,
+                            operation: delivery.operation, itemType: delivery.itemType,
+                            party: delivery.party, time: delivery.time, into: &log)
+        }
+    }
+
     // MARK: - Daemon events (folder & device rows)
 
     /// Emit the batch's pause/resume rows: one per subject, or one
@@ -1278,7 +1329,7 @@ final class ActivityFeed: ObservableObject {
                                           party: isFolder ? nil : summary,
                                           bulkCount: group.names.count)
             }
-            context.entries.insert(entry, at: 0)
+            context.log.append(entry)
         }
     }
 
@@ -1288,72 +1339,51 @@ final class ActivityFeed: ObservableObject {
     private func logFolderErrors(_ context: inout BatchContext, api: SyncthingAPI) async {
         for (folder, time) in context.errorFolders {
             let text = (try? await api.folderStatusError(id: folder)) ?? nil
-            context.entries.insert(Entry.daemonEvent(.folderError(text ?? "Folder stopped with an error"),
-                                                     time: time, folderID: folder,
-                                                     folderLabel: folderLabel(for: folder)),
-                                   at: 0)
+            context.log.append(Entry.daemonEvent(.folderError(text ?? "Folder stopped with an error"),
+                                                 time: time, folderID: folder,
+                                                 folderLabel: folderLabel(for: folder)))
         }
     }
 
-    private func logClosure(_ closure: OutboundLedger.FolderClosure, folder: String,
-                            party: String, time: Date, into entries: inout [Entry]) {
-        for (path, item) in closure.items.reversed() {
+    // MARK: - Delivered rows
+
+    /// Convert closed loops into delivered rows, per item. Reverse-sorted so
+    /// the newest-first display shows the closure in path order.
+    private func logClosure(_ closed: [(path: String, item: OutboundLedger.Item)],
+                            folder: String, party: String, time: Date,
+                            into log: inout EntryLog) {
+        for (path, item) in closed.reversed() {
             insertDelivered(folder: folder, path: path, operation: item.operation,
-                            itemType: item.itemType, party: party, time: time,
-                            into: &entries)
-        }
-        if closure.bulkCount > 0 {
-            entries.insert(Entry(time: time, kind: .delivered, folderID: folder,
-                                 folderLabel: folderLabel(for: folder), path: "",
-                                 operation: .modified, bulkCount: closure.bulkCount,
-                                 party: party), at: 0)
+                            itemType: item.itemType, party: party, time: time, into: &log)
         }
     }
 
     /// One delivered entry per (path, device) fact PER EPISODE. The
     /// confirmation paths overlap by design (remoteneed, the availability
     /// check, catch-up, and the sweep can each prove the same delivery), so
-    /// a delivery is suppressed only when a delivered entry for this
-    /// (path, device) is already NEWER than the path's latest
-    /// detected/sending entry — this episode is already confirmed. An OLDER
-    /// delivered entry belongs to a previous episode of a re-changed path
-    /// and must not swallow the new fact (session-wide dedupe silently ate
-    /// every re-churned file's delivery after its first — the Photos bug,
-    /// diagnosed from live logs 2026-08-17).
-    ///
-    /// The array is newest-first, so `firstIndex` finds the newest match and
-    /// a LOWER index means newer. A delivered match with NO episode start in
-    /// the log also suppresses: eviction trims oldest-first, so a surviving
-    /// delivered entry outlived an older start — it can only belong to the
-    /// current episode.
+    /// a delivery is suppressed when the path's CURRENT episode — since its
+    /// newest detected/sending row — already has a delivered row for this
+    /// party (`EntryLog` tracks that per item). An older episode's delivered
+    /// never swallows a re-changed path's new fact (session-wide dedupe
+    /// silently ate every re-churned file's delivery after its first — the
+    /// Photos bug, diagnosed from live logs 2026-08-17).
     private func insertDelivered(folder: String, path: String,
                                  operation: Entry.Operation,
                                  itemType: Entry.ItemType? = nil, party: String,
-                                 time: Date, into entries: inout [Entry]) {
-        if let deliveredIndex = entries.firstIndex(where: {
-            $0.kind == .delivered && $0.folderID == folder && $0.path == path
-                && $0.party == party
-        }) {
-            let episodeStart = entries.firstIndex {
-                ($0.kind == .detected || $0.kind == .sending)
-                    && $0.folderID == folder && $0.path == path
-            }
-            guard let episodeStart, deliveredIndex > episodeStart else { return }
-        }
-        entries.insert(Entry(time: time, kind: .delivered, folderID: folder,
-                             folderLabel: folderLabel(for: folder), path: path,
-                             operation: operation, bulkCount: nil, party: party,
-                             itemType: itemType), at: 0)
+                                 time: Date, into log: inout EntryLog) {
+        let key = ItemKey(folder: folder, path: path)
+        guard !log.isDelivered(key, to: party) else { return }
+        log.append(Entry(time: time, kind: .delivered, folderID: folder,
+                         folderLabel: folderLabel(for: folder), path: path,
+                         operation: operation, bulkCount: nil, party: party,
+                         itemType: itemType))
     }
 
-    /// Bounded append-only cap: newest first, so trimming the tail IS
-    /// oldest-first eviction — the log's only rule.
-    private func commit(_ updated: [Entry]) {
-        var capped = updated
-        if capped.count > Self.maxEntries {
-            capped.removeLast(capped.count - Self.maxEntries)
-        }
-        if capped != entries { entries = capped }
+    /// Publish a working copy: the log itself and its newest-first snapshot.
+    private func commit(_ updated: EntryLog) {
+        log = updated
+        let snapshot = updated.snapshot
+        if snapshot != entries { entries = snapshot }
     }
 
     // MARK: - Naming helpers

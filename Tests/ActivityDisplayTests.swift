@@ -49,19 +49,15 @@ struct ActivityDisplayTests {
     }
 
     /// Name search: case-insensitive substring over the path, ANDed with the
-    /// checkbox groups. Bulk entries carry no path, so a non-empty search
-    /// never matches them (the aggregate tier's documented boundary).
+    /// checkbox groups.
     @Test func searchMatchesPathsCaseInsensitively() {
         let model = ActivityDisplayModel()
         let photo = makeEntry(path: "Photos/IMG_2041.jpeg")
         let note = makeEntry(path: "notes.md")
-        let bulk = makeEntry(path: "", bulkCount: 312)
 
-        #expect(model.allows(bulk))          // empty search hides nothing
         model.searchText = "img_20"
         #expect(model.allows(photo))
         #expect(!model.allows(note))
-        #expect(!model.allows(bulk))
         #expect(model.isActive)
 
         // Search ANDs with the groups: a matching entry still needs its
@@ -83,8 +79,6 @@ struct ActivityDisplayTests {
         #expect(model.summary == "Showing adds & modifies matching “img”")
     }
 
-    /// Bulk entries summarize their count in the Name column; per-item
-    /// entries show their path.
     /// Markers pass every checkbox filter (they explain the gaps in whatever
     /// remains visible, and carry their statement as the name) but NOT a
     /// name search: a search shows file rows only.
@@ -141,10 +135,9 @@ struct ActivityDisplayTests {
         #expect(paused.kind.isDaemonEvent && !paused.kind.isMarker && !paused.kind.isOutbound)
     }
 
-    @Test func displayNameSummarizesBulkEntries() {
-        #expect(makeEntry(bulkCount: 1).displayName == "1 change")
-        #expect(makeEntry(bulkCount: 312).displayName == "312 changes")
+    @Test func displayNameIsThePathForFileRows() {
         #expect(makeEntry(path: "a.txt").displayName == "a.txt")
+        #expect(makeEntry(path: "dir/b.txt", bulkCount: nil).displayName == "dir/b.txt")
     }
 
     /// Direction is a property of the verb: detections and the

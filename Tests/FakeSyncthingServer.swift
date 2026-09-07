@@ -120,24 +120,30 @@ final class FakeSyncthingServer {
     /// stays open, no response — until `releaseHeldRequests()`. Lets a test
     /// freeze a consumer mid-batch on a network await and act on it
     /// meanwhile (the activity feed's commit-epoch contract).
-    private var _holdSubstring: String?
+    private var _holdSubstrings: Set<String> = []
     private var _heldRequests: [(Request, NWConnection)] = []
 
+    /// Several substrings may be held at once; each is released separately.
     func holdRequests(containing substring: String) {
-        queue.sync { _holdSubstring = substring }
+        queue.sync { _ = _holdSubstrings.insert(substring) }
     }
 
     var heldRequestCount: Int {
         queue.sync { _heldRequests.count }
     }
 
-    /// Stop holding and answer every parked request normally.
-    func releaseHeldRequests() {
+    /// Stop holding (one substring, or all) and answer the parked requests
+    /// that match normally.
+    func releaseHeldRequests(containing substring: String? = nil) {
         queue.sync {
-            _holdSubstring = nil
-            let held = _heldRequests
-            _heldRequests = []
-            for (request, connection) in held { dispatch(request, on: connection) }
+            if let substring { _holdSubstrings.remove(substring) } else { _holdSubstrings = [] }
+            let (release, keep) = _heldRequests.reduce(into: ([(Request, NWConnection)](),
+                                                              [(Request, NWConnection)]())) {
+                if substring == nil || $1.0.path.contains(substring!) { $0.0.append($1) }
+                else { $0.1.append($1) }
+            }
+            _heldRequests = keep
+            for (request, connection) in release { dispatch(request, on: connection) }
         }
     }
 
@@ -318,7 +324,7 @@ final class FakeSyncthingServer {
 
     private func handle(_ request: Request, on connection: NWConnection) {
         _requestedPaths.append(request.path)
-        if let hold = _holdSubstring, request.path.contains(hold) {
+        if _holdSubstrings.contains(where: { request.path.contains($0) }) {
             _heldRequests.append((request, connection))
             return
         }
