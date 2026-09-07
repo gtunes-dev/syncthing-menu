@@ -110,6 +110,15 @@ final class FakeSyncthingServer {
         set { queue.sync { _folders = newValue } }
     }
 
+    /// How long an empty long-poll parks before answering (the real daemon's
+    /// ~50s, capped here so idle wakes stay quick). Tests that sample state
+    /// BETWEEN wakes widen it so the window is not a race under CI load.
+    private var _longPollCap: TimeInterval = 0.25
+    var longPollCap: TimeInterval {
+        get { queue.sync { _longPollCap } }
+        set { queue.sync { _longPollCap = newValue } }
+    }
+
     /// Fail this many upcoming requests with a 500 (any endpoint), then recover.
     var failNextRequests: Int {
         get { queue.sync { _failNextRequests } }
@@ -446,7 +455,7 @@ final class FakeSyncthingServer {
             self?.send(events, on: connection)
         }
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + min(timeout, 0.25))
+        timer.schedule(deadline: .now() + min(timeout, _longPollCap))
         timer.setEventHandler { [weak self, weak waiter] in
             guard let self, let waiter else { return }
             self.waiters.removeAll { $0 === waiter }

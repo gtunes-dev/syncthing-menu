@@ -1710,6 +1710,9 @@ struct ActivityFeedTests {
                          data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
                                 "state": Dictionary(uniqueKeysWithValues: paths.map { ($0, 1) })])
         try await expectEventually { feed.activity.count == 30 }
+        // The "exactly 20 so far" sample below lives BETWEEN two wakes; widen
+        // the idle wake so that window is a second, not a race (CI flake).
+        server.longPollCap = 1.0
         server.pushEvent(type: "RemoteDownloadProgress",
                          data: ["folder": "f1", "device": "REMOTE7-FULL-ID",
                                 "state": [String: Int]()])
