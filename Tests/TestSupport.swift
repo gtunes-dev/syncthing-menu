@@ -11,7 +11,7 @@ final class FakeEndpointSource: EndpointSource {
         self.endpoint = endpoint
     }
 
-    func refreshEndpoint() throws -> SyncthingProcess.Endpoint? {
+    @MainActor func refreshEndpoint() throws -> SyncthingProcess.Endpoint? {
         if let error { throw error }
         return endpoint
     }

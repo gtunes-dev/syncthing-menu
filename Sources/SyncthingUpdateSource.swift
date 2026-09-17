@@ -230,6 +230,7 @@ final class SyncthingUpdateSource: UpdateSource {
         pendingUpgrade = nil
     }
 
+    @MainActor
     private func waitForIdle() async {
         let deadline = Date().addingTimeInterval(quiesceTimeout)
         while isDaemonBusy?() == true {
@@ -247,6 +248,7 @@ final class SyncthingUpdateSource: UpdateSource {
     /// daemon reports failure — a settle window spent waiting on a dead daemon
     /// would only delay the same answer. A timeout is a FAILURE: reporting
     /// success would let a persistently failing upgrade re-offer silently.
+    @MainActor
     private func waitForSettle(from: String, daemon: ManagedDaemon) async throws -> String {
         let deadline = Date().addingTimeInterval(settleTimeout)
         while Date() < deadline {

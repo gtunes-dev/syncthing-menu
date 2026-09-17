@@ -163,7 +163,7 @@ struct SyncthingProcessTests {
     @Test func unsignedBinaryIsNeverSpawned() async throws {
         let fixture = try StubDaemonFixture(script: Self.stayAlive)
         defer { fixture.tearDown() }
-        fixture.process.verifyBinary = BinaryVerifier.verifySyncthingBinary
+        fixture.process.verifyBinary = { try BinaryVerifier.verifySyncthingBinary(at: $0) }
 
         var thrown: DaemonLaunchError?
         do { try await fixture.process.start() } catch let error as DaemonLaunchError { thrown = error }

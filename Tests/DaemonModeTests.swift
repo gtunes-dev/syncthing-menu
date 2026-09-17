@@ -5,6 +5,7 @@ import Testing
 /// The daemon-mode model: address normalization, endpoint configured-ness, and
 /// the persistence contract (mode and connection fields under independent keys,
 /// the API key in the secret store — never in defaults).
+@MainActor
 struct DaemonModeTests {
 
     private func makeSettings(defaults: UserDefaults? = nil,

@@ -428,7 +428,7 @@ final class ActivityFeed: ObservableObject {
     /// files, listed per item) does not evict the rest of a day's history
     /// under always-on recording, while staying trivial in memory (~1 MB)
     /// and in the per-commit snapshot and the view's sort and search.
-    static let windowSize = 5_000
+    nonisolated static let windowSize = 5_000
     /// How long an open loop may wait for its event-driven ending before the
     /// quiescence sweep probes for it. Comfortably past the event cadence
     /// (completion ticks ~2s, progress reports ~5s).
@@ -755,7 +755,7 @@ final class ActivityFeed: ObservableObject {
         // stand down for them from the first index event, not from the next
         // syncing transition (review finding, 2026-09-07). One small read
         // per folder, tolerant — an unreadable (paused) folder is not syncing.
-        for folder in folders where !(folder.paused ?? false) {
+        for folder in folders where !folder.paused {
             if let state = try? await api.folderState(id: folder.id),
                Self.syncingStates.contains(state) {
                 syncingFolders.insert(folder.id)

@@ -4,7 +4,7 @@ import Foundation
 /// endpoint. `SyncthingProcess.refreshEndpoint()` is the production conformer
 /// (it re-reads `config.xml`); tests substitute a scripted one.
 protocol EndpointSource: AnyObject {
-    func refreshEndpoint() throws -> SyncthingProcess.Endpoint?
+    @MainActor func refreshEndpoint() throws -> SyncthingProcess.Endpoint?
 }
 
 extension SyncthingProcess: EndpointSource {}

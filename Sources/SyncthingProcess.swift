@@ -6,29 +6,30 @@ import os
 /// operations an in-place binary upgrade sequences — stop, swap, start, and
 /// confirm — so the mechanism never reaches into process internals.
 /// `SyncthingProcess` is the production conformer; tests script one.
+@MainActor
 protocol ManagedDaemon: AnyObject {
     /// Whether the daemon is spawned and not known to have exited.
     var isRunning: Bool { get }
     /// Stop the daemon without latching the terminal guard. Returns the launch
     /// token of the stop, or nil when a terminal stop (quit) superseded it —
     /// the app is exiting.
-    @MainActor func shutdown() async -> LaunchToken?
+    func shutdown() async -> LaunchToken?
     /// Swap the binary via Syncthing's own upgrader. Requires the daemon to be
     /// stopped. Whatever happens, a runnable binary is left in place.
-    @MainActor func upgradeBinary(from assetURL: URL) async throws -> BinarySwap
+    func upgradeBinary(from assetURL: URL) async throws -> BinarySwap
     /// Launch the daemon; resolves once it is spawned and throws a
     /// `DaemonLaunchError` if the launch failed before exec (provenance,
     /// config, spawn) or was superseded. `token` binds the launch to the stop
     /// that preceded it: if another stop landed since (a mode switch), the
     /// launch is refused with `.superseded` instead of spawning a daemon the
     /// app no longer expects.
-    @MainActor func start(after token: LaunchToken?) async throws
+    func start(after token: LaunchToken?) async throws
 }
 
 extension ManagedDaemon {
     /// Launch unconditionally — the app's own launch paths, which are the
     /// current intent by definition.
-    @MainActor func start() async throws { try await start(after: nil) }
+    func start() async throws { try await start(after: nil) }
 }
 
 /// The receipt of a `shutdown()`: names the launch generation that stop
@@ -65,6 +66,13 @@ enum DaemonLaunchError: LocalizedError, Equatable {
 /// Also the one place the binary's one-shot subcommands run (`generate` at first
 /// launch, `upgrade` for updates) — `runCommand` — so every invocation of the
 /// binary shares one spawn, relay, and timeout path.
+///
+/// Isolation: main-actor. Every piece of process state lives on main; the
+/// blocking work (launch prep, the stop ladder, a one-shot run) is
+/// `nonisolated`, runs on a global queue, touches only its arguments, `let`
+/// configuration, and the lock-guarded `CommandSlot`, and hands results back
+/// through continuations or main-actor tasks.
+@MainActor
 final class SyncthingProcess: ManagedDaemon {
     enum State: Equatable {
         case stopped
@@ -129,13 +137,34 @@ final class SyncthingProcess: ManagedDaemon {
 
     /// The one-shot subcommand currently running (`generate`, `upgrade`), so a
     /// terminal `stop()` can end it — an orphaned `upgrade` finishing after the
-    /// app quit would swap the binary under whatever launches next. Written on
-    /// the queue that runs the command, read on main: lock-guarded together
-    /// with `commandsRefused`, which `stop()` raises so no command can start
-    /// in the gap between its check and the child's registration.
-    private var commandProcess: Process?
-    private var commandsRefused = false
-    private let commandLock = NSLock()
+    /// app quit would swap the binary under whatever launches next. Shared
+    /// between the queue that runs the command and the main-thread quit path,
+    /// hence its own lock; `refuseFurther` closes the gap between the quit's
+    /// check and a child's registration.
+    private let commands = CommandSlot()
+
+    private final class CommandSlot: @unchecked Sendable {
+        private let lock = NSLock()
+        private var process: Process?
+        private var refused = false
+
+        /// Launch and register atomically — or refuse, if a quit has begun.
+        func run(_ proc: Process) throws {
+            try lock.withLock {
+                guard !refused else { throw CommandRefused() }
+                try proc.run()
+                process = proc
+            }
+        }
+        func clear() { lock.withLock { process = nil } }
+        /// Refuse every further run; returns the one in flight, if any.
+        func refuseFurther() -> Process? {
+            lock.withLock { refused = true; return process }
+        }
+    }
+
+    /// A one-shot run refused because a terminal `stop()` has begun.
+    private struct CommandRefused: Error {}
 
     /// How long a terminal `stop()` lets an in-flight one-shot run finish on
     /// its own before terminating it: an `upgrade` that completes its swap is
@@ -155,7 +184,7 @@ final class SyncthingProcess: ManagedDaemon {
     private var launchEpoch = 0
 
     /// Where we persist *our* chosen GUI port (not in Syncthing's config).
-    private static let guiPortDefaultsKey = "syncthing.managedGUIPort"
+    private nonisolated static let guiPortDefaultsKey = "syncthing.managedGUIPort"
 
     /// How long each rung of the stop ladder (REST → SIGTERM → SIGKILL) waits
     /// before escalating on the TERMINAL stop (`stop()`, which blocks the
@@ -184,15 +213,17 @@ final class SyncthingProcess: ManagedDaemon {
     /// launch prep) — fresh launch and Start Syncthing both pass through here,
     /// so a binary the daemon's self-upgrade wrote is checked at the next spawn.
     /// Injectable seam: the process tests spawn unsigned stub scripts.
-    var verifyBinary: (URL) throws -> Void = BinaryVerifier.verifySyncthingBinary
+    var verifyBinary: @Sendable (URL) throws -> Void = { try BinaryVerifier.verifySyncthingBinary(at: $0) }
 
-    init(binaryURL: URL = ReleaseUpdater.installedBinaryURL,
-         homeURL: URL = SyncthingProcess.defaultHomeURL) {
+    /// Nonisolated so the owner (the app delegate, at construction time) can
+    /// create the process before anything runs on the main actor.
+    nonisolated init(binaryURL: URL = ReleaseUpdater.installedBinaryURL,
+                     homeURL: URL = SyncthingProcess.defaultHomeURL) {
         self.binaryURL = binaryURL
         self.homeURL = homeURL
     }
 
-    static var defaultHomeURL: URL {
+    nonisolated static var defaultHomeURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Syncthing Menu/home", isDirectory: true)
     }
@@ -218,19 +249,20 @@ final class SyncthingProcess: ManagedDaemon {
             return
         }
         let epoch = launchEpoch
+        let verify = verifyBinary
         state = .starting
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             spawnContinuation = continuation
             // Generate (first run) can block briefly, so do prep off-main; the actual
             // launch returns to main to keep process state consistent.
-            DispatchQueue.global().async { [weak self] in
-                guard let self else { return }
-                do {
-                    let plan = try self.prepareLaunch()
-                    DispatchQueue.main.async { self.launchServe(plan: plan, epoch: epoch) }
-                } catch {
-                    DispatchQueue.main.async {
+            DispatchQueue.global().async {
+                let outcome = Result { try self.prepareLaunch(verify: verify) }
+                Task { @MainActor in
+                    switch outcome {
+                    case let .success(plan):
+                        self.launchServe(plan: plan, epoch: epoch)
+                    case let .failure(error):
                         guard !self.isTerminating, epoch == self.launchEpoch else {
                             self.resolveSpawn(.failure(DaemonLaunchError.superseded))
                             return
@@ -300,7 +332,7 @@ final class SyncthingProcess: ManagedDaemon {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 DispatchQueue.global(qos: .userInitiated).async {
                     self.escalateAndReap(pid, restGrace: graces.rest, termGrace: graces.term, rest: request)
-                    DispatchQueue.main.async { continuation.resume() }
+                    continuation.resume()
                 }
             }
             self.stopTask = nil
@@ -357,8 +389,7 @@ final class SyncthingProcess: ManagedDaemon {
         Log.process.log("upgrade: running syncthing upgrade --from \(assetURL.absoluteString, privacy: .public)")
         let outcome = await withCheckedContinuation { (continuation: CheckedContinuation<Result<CommandOutcome, Error>, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
-                let result = Result { try self.runCommand(arguments, timeout: timeout) }
-                DispatchQueue.main.async { continuation.resume(returning: result) }
+                continuation.resume(returning: Result { try self.runCommand(arguments, timeout: timeout) })
             }
         }
         if swap.recoverIfInterrupted() {
@@ -381,7 +412,7 @@ final class SyncthingProcess: ManagedDaemon {
 
     // MARK: - One-shot subcommands
 
-    private enum CommandOutcome: Equatable {
+    private enum CommandOutcome: Equatable, Sendable {
         case exited(Int32)
         case signaled(Int32)
         case timedOut
@@ -401,7 +432,7 @@ final class SyncthingProcess: ManagedDaemon {
     /// output to the log. Blocking — call off-main. A run that outlives
     /// `timeout` is SIGTERMed, then SIGKILLed if it lingers; a terminal
     /// `stop()` SIGTERMs it the same way (`terminateCommand`).
-    private func runCommand(_ arguments: [String], timeout: TimeInterval) throws -> CommandOutcome {
+    private nonisolated func runCommand(_ arguments: [String], timeout: TimeInterval) throws -> CommandOutcome {
         let proc = Process()
         proc.executableURL = binaryURL
         proc.arguments = arguments
@@ -414,23 +445,19 @@ final class SyncthingProcess: ManagedDaemon {
         proc.standardError = pipe
         Self.relay(pipe.fileHandleForReading, prefix: "[\(subcommand)] ")
 
-        // Launch and register under the one lock, so a terminal `stop()` either
-        // sees the child or has already refused it — never a child it missed.
-        try commandLock.withLock {
-            guard !commandsRefused else { throw CommandRefused() }
-            try proc.run()
-            commandProcess = proc
-        }
-        defer { commandLock.withLock { commandProcess = nil } }
+        // Launch and register atomically, so a terminal `stop()` either sees
+        // the child or has already refused it — never a child it missed.
+        try commands.run(proc)
+        defer { commands.clear() }
 
         // The watchdog only ever acts on a process that is still running: a
         // run that exits normally right at the deadline is a normal exit, and
         // the weak capture keeps a cancelled item from retaining the process
         // (and its pipe) until the deadline passes.
-        var timedOut = false
-        let watchdog = DispatchWorkItem { [weak proc, commandLock] in
+        let timedOut = TimedOutFlag()
+        let watchdog = DispatchWorkItem { [weak proc] in
             guard let proc, proc.isRunning else { return }
-            commandLock.withLock { timedOut = true }
+            timedOut.set()
             Log.process.error("\(subcommand, privacy: .public) didn't finish within \(Int(timeout))s — terminating it")
             Self.terminate(proc)
         }
@@ -442,19 +469,25 @@ final class SyncthingProcess: ManagedDaemon {
         case .exit:
             return .exited(proc.terminationStatus)
         default:
-            return commandLock.withLock({ timedOut }) ? .timedOut : .signaled(proc.terminationStatus)
+            return timedOut.isSet ? .timedOut : .signaled(proc.terminationStatus)
         }
     }
 
-    /// A one-shot run refused because a terminal `stop()` has begun.
-    private struct CommandRefused: Error {}
+    /// Set by the watchdog on its queue, read after `waitUntilExit` on the
+    /// runner's: a lock-guarded boolean.
+    private final class TimedOutFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var isSet: Bool { lock.withLock { value } }
+        func set() { lock.withLock { value = true } }
+    }
 
     /// SIGTERM, wait, then SIGKILL if the process lingers; returns once it is
     /// gone. Blocking — the watchdog runs it off-main, the terminal `stop()`
     /// on the quitting main thread, where blocking is the point. Go exits on
     /// SIGTERM at once (no deferred cleanup — hence
     /// `BinarySwap.recoverIfInterrupted`), so the KILL is a backstop.
-    private static func terminate(_ proc: Process) {
+    private nonisolated static func terminate(_ proc: Process) {
         guard proc.isRunning else { return }
         let pid = proc.processIdentifier
         proc.terminate()
@@ -469,11 +502,7 @@ final class SyncthingProcess: ManagedDaemon {
     /// Returns with the child gone either way, so the app never exits with a
     /// swap in an unknown state.
     private func stopCommand() {
-        let running: Process? = commandLock.withLock {
-            commandsRefused = true
-            return commandProcess
-        }
-        guard let running, running.isRunning else { return }
+        guard let running = commands.refuseFurther(), running.isRunning else { return }
         let name = running.arguments?.first ?? "?"
         if Self.waitForDeath(running.processIdentifier, commandQuitGrace) {
             Log.process.log("in-flight \(name, privacy: .public) run finished before quit")
@@ -485,7 +514,7 @@ final class SyncthingProcess: ManagedDaemon {
 
     /// The fate of a REST shutdown request, shared with the ladder thread: the
     /// REST rung waits only while the request can still succeed.
-    private final class RestShutdownRequest {
+    private final class RestShutdownRequest: @unchecked Sendable {
         private let lock = NSLock()
         private var failed = false
         var hasFailed: Bool { lock.withLock { failed } }
@@ -524,8 +553,8 @@ final class SyncthingProcess: ManagedDaemon {
     /// worker died too — the ladder is not done while any lock-holder survives.
     /// The REST rung waits its grace only while the request stands: a missing
     /// endpoint or a refused request falls through to SIGTERM at once.
-    private func escalateAndReap(_ pid: pid_t, restGrace: TimeInterval, termGrace: TimeInterval,
-                                 rest request: RestShutdownRequest) {
+    private nonisolated func escalateAndReap(_ pid: pid_t, restGrace: TimeInterval, termGrace: TimeInterval,
+                                             rest request: RestShutdownRequest) {
         // Snapshot the monitor's children BEFORE stopping: if the ladder ever
         // reaches SIGKILL, the monitor dies alone and the worker survives as an
         // orphan still holding the database lock — a respawn would crash-loop
@@ -560,7 +589,7 @@ final class SyncthingProcess: ManagedDaemon {
     /// die before the monitor does, so this is normally an instant no-op), then
     /// SIGKILL any survivor: after the ladder nothing supervises them, and a
     /// surviving worker holds the daemon's database lock.
-    private func reapOrphanedWorkers(_ workers: [pid_t]) {
+    private nonisolated func reapOrphanedWorkers(_ workers: [pid_t]) {
         for worker in workers {
             if Self.waitForDeath(worker, 3) { continue }
             Log.process.log("worker \(worker) survived the monitor — sending SIGKILL")
@@ -574,7 +603,7 @@ final class SyncthingProcess: ManagedDaemon {
     /// Poll until `pid` no longer exists (kill-0 probe; workers are
     /// grandchildren, so `waitpid` doesn't apply). PID reuse inside this
     /// seconds-scale window is not a realistic concern.
-    private static func waitForDeath(_ pid: pid_t, _ seconds: TimeInterval) -> Bool {
+    private nonisolated static func waitForDeath(_ pid: pid_t, _ seconds: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while kill(pid, 0) == 0 {
             if Date() >= deadline { return false }
@@ -585,8 +614,8 @@ final class SyncthingProcess: ManagedDaemon {
 
     /// The live child PIDs of `pid`, via libproc. Empty on any failure — the
     /// ladder then degrades to its old monitor-only behavior.
-    private static let procPPIDOnly: UInt32 = 6   // PROC_PPID_ONLY (proc_info.h)
-    static func childPIDs(of pid: pid_t) -> [pid_t] {
+    private nonisolated static let procPPIDOnly: UInt32 = 6   // PROC_PPID_ONLY (proc_info.h)
+    nonisolated static func childPIDs(of pid: pid_t) -> [pid_t] {
         var pids = [pid_t](repeating: 0, count: 64)
         let bytes = pids.withUnsafeMutableBufferPointer {
             proc_listpids(procPPIDOnly, UInt32(pid),
@@ -598,8 +627,8 @@ final class SyncthingProcess: ManagedDaemon {
 
     /// Poll `waitpid` until the process is reaped, `seconds` elapse, or
     /// `abortIf` says the wait is pointless; returns whether reaped.
-    private func waitForExit(_ pid: pid_t, _ seconds: TimeInterval,
-                             abortIf: () -> Bool = { false }) -> Bool {
+    private nonisolated func waitForExit(_ pid: pid_t, _ seconds: TimeInterval,
+                                         abortIf: () -> Bool = { false }) -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         var status: Int32 = 0
         while true {
@@ -629,8 +658,11 @@ final class SyncthingProcess: ManagedDaemon {
         let guiAddressOverride: String?
     }
 
-    private func prepareLaunch() throws -> LaunchPlan {
-        try verifyBinary(binaryURL)
+    /// Off-main launch prep: provenance, home directory, first-run `generate`,
+    /// endpoint plan. Takes the verifier as an argument because it is an
+    /// injectable main-actor property.
+    private nonisolated func prepareLaunch(verify: @Sendable (URL) throws -> Void) throws -> LaunchPlan {
+        try verify(binaryURL)
 
         let fm = FileManager.default
         try fm.createDirectory(at: homeURL, withIntermediateDirectories: true)
@@ -687,7 +719,7 @@ final class SyncthingProcess: ManagedDaemon {
     }
 
     /// First launch: have Syncthing write its initial `config.xml` + keys.
-    private func runGenerate() throws {
+    private nonisolated func runGenerate() throws {
         let outcome = try runCommand(["generate", "--home", homeURL.path], timeout: 60)
         guard outcome == .exited(0) else {
             throw GenerateError(outcome: outcome.summary)
@@ -785,18 +817,21 @@ final class SyncthingProcess: ManagedDaemon {
         let source = DispatchSource.makeProcessSource(identifier: newPid, eventMask: .exit,
                                                       queue: .main)
         source.setEventHandler { [weak self] in
-            guard let self else { return }
-            self.exitSource?.cancel()
-            self.exitSource = nil
-            var status: Int32 = 0
-            waitpid(newPid, &status, WNOHANG)
-            self.pid = nil
-            self.stdoutHandle?.readabilityHandler = nil
-            self.stdoutHandle = nil
-            if !self.isTerminating {
-                // Surface the exit; deliberately no auto-restart (worker crashes
-                // are already restarted by Syncthing's own monitor process).
-                self.state = .failed("Syncthing exited (\(Self.describe(status)))")
+            // The source is bound to the main queue; say so to the compiler.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.exitSource?.cancel()
+                self.exitSource = nil
+                var status: Int32 = 0
+                waitpid(newPid, &status, WNOHANG)
+                self.pid = nil
+                self.stdoutHandle?.readabilityHandler = nil
+                self.stdoutHandle = nil
+                if !self.isTerminating {
+                    // Surface the exit; deliberately no auto-restart (worker crashes
+                    // are already restarted by Syncthing's own monitor process).
+                    self.state = .failed("Syncthing exited (\(Self.describe(status)))")
+                }
             }
         }
         source.resume()
@@ -830,7 +865,7 @@ final class SyncthingProcess: ManagedDaemon {
     /// the daemon's and the one-shot subcommands' output alike (the latter
     /// prefixed with their name). Known nit, shared by design so it is fixed
     /// in one place: a multi-line chunk logs as one entry.
-    private static func relay(_ handle: FileHandle, prefix: String = "") {
+    private nonisolated static func relay(_ handle: FileHandle, prefix: String = "") {
         handle.readabilityHandler = { h in
             let data = h.availableData
             guard !data.isEmpty else { h.readabilityHandler = nil; return }   // EOF
@@ -841,13 +876,13 @@ final class SyncthingProcess: ManagedDaemon {
     }
 
     /// Human-readable description of a `waitpid` status.
-    private static func describe(_ status: Int32) -> String {
+    private nonisolated static func describe(_ status: Int32) -> String {
         (status & 0x7f) == 0 ? "code \((status >> 8) & 0xff)" : "signal \(status & 0x7f)"
     }
 
     // MARK: - GUI port persistence (our side, never Syncthing's config)
 
-    private func persistedGUIPort() -> UInt16 {
+    private nonisolated func persistedGUIPort() -> UInt16 {
         let defaults = UserDefaults.standard
         let stored = defaults.integer(forKey: Self.guiPortDefaultsKey)
         if stored > 0, let port = UInt16(exactly: stored), Self.isPortFree(port) {
@@ -860,7 +895,7 @@ final class SyncthingProcess: ManagedDaemon {
 
     // MARK: - Port helpers
 
-    private static func isPortFree(_ port: UInt16) -> Bool {
+    private nonisolated static func isPortFree(_ port: UInt16) -> Bool {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         if fd < 0 { return false }
         defer { close(fd) }
@@ -876,7 +911,7 @@ final class SyncthingProcess: ManagedDaemon {
         return result == 0
     }
 
-    private static func findFreePort() -> UInt16? {
+    private nonisolated static func findFreePort() -> UInt16? {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         if fd < 0 { return nil }
         defer { close(fd) }
