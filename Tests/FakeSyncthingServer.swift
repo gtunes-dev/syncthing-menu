@@ -211,25 +211,43 @@ final class FakeSyncthingServer {
     // MARK: - Lifecycle
 
     /// Start listening on an OS-assigned localhost port; `baseURL` is valid after
-    /// this returns.
+    /// this returns. Loopback only: the fake daemon never needs another
+    /// interface, and a loopback-bound listener's readiness doesn't wait on
+    /// network-path evaluation — on the CI runner (2026-09-16, macOS 26 image)
+    /// an unrestricted listener took ~5s to report ready, which every
+    /// server-backed test paid and one lost a race to. Readiness is REQUIRED:
+    /// proceeding with a listener that never reported ready turns a clear
+    /// environment problem into a mysterious wait timeout downstream.
     func start() throws {
-        let listener = try NWListener(using: .tcp)
+        let parameters = NWParameters.tcp
+        parameters.requiredInterfaceType = .loopback
+        let listener = try NWListener(using: parameters)
         let ready = DispatchSemaphore(value: 0)
+        var readyState: NWListener.State?
         listener.stateUpdateHandler = { state in
             switch state {
-            case .ready, .failed, .cancelled: ready.signal()
+            case .ready, .failed, .cancelled:
+                readyState = state
+                ready.signal()
             default: break
             }
         }
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
+        let started = Date()
         listener.start(queue: queue)
         self.listener = listener
-        _ = ready.wait(timeout: .now() + 5)
-        guard let port = listener.port?.rawValue, port > 0 else {
+        let outcome = ready.wait(timeout: .now() + 20)
+        let delay = Date().timeIntervalSince(started)
+        if delay > 1 {
+            print("FakeSyncthingServer: listener took \(String(format: "%.1f", delay))s to report \(String(describing: readyState))")
+        }
+        guard outcome == .success, case .ready? = readyState,
+              let port = listener.port?.rawValue, port > 0 else {
             throw NSError(domain: "FakeSyncthingServer", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "listener failed to become ready"])
+                          userInfo: [NSLocalizedDescriptionKey:
+                                        "listener failed to become ready (\(String(describing: readyState)) after \(Int(delay))s)"])
         }
         self.port = port
     }

@@ -40,7 +40,14 @@ struct TimedOutError: Error {}
 /// code under test is main-thread confined, so polling from the main actor with
 /// suspension points is race-free by construction.
 @MainActor
-func expectEventually(timeout: TimeInterval = 5,
+/// The default timeout is a CEILING, not a delay — a passing condition
+/// returns at the next 20ms poll. It is generous because many waits span a
+/// real localhost long-poll cycle against the fake daemon, and under a fully
+/// parallel suite on a loaded machine (a CI runner, or the process tests'
+/// shell spawns beside the activity tests) 5s proved too tight: two different
+/// activity-feed tests timed out at 5s on 2026-09-16 while passing every
+/// isolated run.
+func expectEventually(timeout: TimeInterval = 20,
                       _ condition: () -> Bool) async throws {
     let deadline = Date().addingTimeInterval(timeout)
     while !condition() {
