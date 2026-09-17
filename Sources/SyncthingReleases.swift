@@ -7,9 +7,10 @@ import Foundation
 /// daemon's `GET /rest/system/upgrade`, so availability must be determined here:
 /// fetch the same releases feed the daemon uses (`releasesURL`, GitHub-releases
 /// shaped JSON) and apply the same selection and version-comparison rules. The
-/// *install* still goes through `POST /rest/system/upgrade` (unaffected by the
-/// flag), where the daemon re-resolves the release itself and SHA-verifies the
-/// download — a divergence here can surface the wrong version, never install it.
+/// *install* hands the selected asset's URL to `syncthing upgrade --from`
+/// (`SyncthingProcess.upgradeBinary`), where Syncthing's own upgrader downloads
+/// it and verifies the release signature — a divergence here can surface the
+/// wrong version, never install an unverified one.
 ///
 /// Ported from `lib/upgrade` at syncthing v2.1.1 (`CompareVersions`,
 /// `SelectLatestRelease`, `releaseNames`); the port is field-for-field so the two
@@ -26,6 +27,34 @@ enum SyncthingReleases {
 
         struct Asset: Decodable, Equatable {
             let name: String
+            /// The feed's download URL (`url`), if it carries one; a missing
+            /// URL never fails the feed — selection is by name.
+            let url: URL?
+            /// GitHub's `browser_download_url`, when the feed is the GitHub
+            /// API itself (its `url` is then an API endpoint, not a file).
+            let browserURL: URL?
+
+            init(name: String, url: URL?, browserURL: URL? = nil) {
+                self.name = name
+                self.url = url
+                self.browserURL = browserURL
+            }
+
+            private enum CodingKeys: String, CodingKey {
+                case name, url, browserURL = "browser_download_url"
+            }
+
+            /// The URL an install may hand to `syncthing upgrade --from`:
+            /// Syncthing derives the archive name the release signature covers
+            /// from the URL's last path component, so only a URL ending in
+            /// the asset's file name can verify. Nil when the feed offers no
+            /// such URL — the check then fails loudly rather than offering an
+            /// install that would fail every time.
+            var downloadURL: URL? {
+                let fileName = (name as NSString).lastPathComponent
+                return [url, browserURL].compactMap { $0 }
+                    .first { $0.lastPathComponent == fileName }
+            }
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -37,6 +66,9 @@ enum SyncthingReleases {
         case http(Int)
         /// No release in the feed carries an asset for this OS/architecture.
         case noApplicableRelease
+        /// The selected asset has no download URL the install can verify
+        /// (see `Release.Asset.downloadURL`).
+        case assetNotInstallable(String)
     }
 
     /// Fetch the releases feed (the daemon's `releasesURL`, normally
@@ -82,18 +114,27 @@ enum SyncthingReleases {
 
             if release.prerelease && !upgradeToPreReleases { continue }
 
-            let expectedPrefixes = releaseNames(tag: release.tag, arch: arch)
-            let matches = release.assets.contains { asset in
-                let assetName = (asset.name as NSString).lastPathComponent
-                return expectedPrefixes.contains { assetName.hasPrefix($0) }
-            }
-            if matches {
+            if upgradeAsset(of: release, arch: arch) != nil {
                 selected = release
             }
         }
 
         guard let selected else { throw FeedError.noApplicableRelease }
         return selected
+    }
+
+    /// The asset the daemon's upgrader would install for `arch` from `release`
+    /// — the first, in feed order, named for this OS/arch (`upgradeTo` in
+    /// `lib/upgrade`). Nil when the release ships none, which is also what
+    /// disqualifies it from selection above; the install passes the chosen
+    /// asset's URL to `syncthing upgrade --from`, so check and install resolve
+    /// the same file.
+    static func upgradeAsset(of release: Release, arch: String) -> Release.Asset? {
+        let expectedPrefixes = releaseNames(tag: release.tag, arch: arch)
+        return release.assets.first { asset in
+            let assetName = (asset.name as NSString).lastPathComponent
+            return expectedPrefixes.contains { assetName.hasPrefix($0) }
+        }
     }
 
     /// The asset-name prefixes that identify a macOS build of `tag` for `arch`

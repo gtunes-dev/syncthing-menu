@@ -24,8 +24,10 @@
 //   dimming is the runtime `appearsDisabled` for "not running".
 // - States differ by center MASS/silhouette in the constant frame:
 //   idle = empty, syncing = ↔ (data exchanged between devices),
-//   paused = ‖, error = ! . Texture-level changes are imperceptible at
-//   menu-bar size.
+//   paused = ‖, error = !, updating = ↑ (the daemon's binary being
+//   swapped — same arrow as the update badge, grown to a center glyph, at
+//   full ink: an update in progress is activity, not absence, so it is
+//   never dimmed). Texture-level changes are imperceptible at menu-bar size.
 // - The update badge sits at the EXACT lower-right node position, fully
 //   replacing it — "that node lights up as the update light". Halo
 //   treatment: the ring opens around a knockout gap and the badge disc
@@ -41,7 +43,7 @@
 import AppKit
 import CoreGraphics
 
-enum IconState { case idle, syncing, paused, error }
+enum IconState { case idle, syncing, paused, error, updating }
 
 let C = CGPoint(x: 12, y: 12)
 let ringR: CGFloat = 9.5
@@ -114,6 +116,15 @@ func render(_ state: IconState, update: Bool, size: Int) -> Data {
         ctx.strokeLineSegments(between: [gp(0, -3.2), gp(0, 1.2)])
         let dot = gp(0, 4.2), dr = 1.35 * glyphScale
         ctx.fillEllipse(in: CGRect(x: dot.x - dr, y: dot.y - dr, width: dr * 2, height: dr * 2))
+    case .updating:
+        // Up arrow: the syncing arrow's weight and reach, turned vertical
+        // and single-headed — the update badge's glyph at center size.
+        ctx.setLineWidth(1.8 * glyphScale)
+        ctx.strokeLineSegments(between: [gp(0, 3.8), gp(0, -3.8)])
+        ctx.strokeLineSegments(between: [
+            gp(0, -3.8), gp(-2.4, -1.4),
+            gp(0, -3.8), gp(2.4, -1.4),
+        ])
     }
 
     // Update badge at the lower-right node, replacing it (the plain node was
@@ -147,6 +158,7 @@ let items: [(String, IconState, Bool)] = [
     ("StatusSyncing", .syncing, false), ("StatusSyncingUpdate", .syncing, true),
     ("StatusPaused", .paused, false),   ("StatusPausedUpdate", .paused, true),
     ("StatusError", .error, false),     ("StatusErrorUpdate", .error, true),
+    ("StatusUpdating", .updating, false), ("StatusUpdatingUpdate", .updating, true),
 ]
 let fm = FileManager.default
 for (name, state, update) in items {

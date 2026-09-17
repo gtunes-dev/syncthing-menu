@@ -350,9 +350,9 @@ struct ActivityDisplayTests {
         #expect(model.display == .updating)
         #expect(model.statusText == "Updating…")
 
-        model.update(.notRunning)                  // re-root: daemon stopping
+        model.update(.notRunning)                  // update: daemon stopped
         #expect(model.display == .updating)
-        model.update(.starting)                    // re-root: fresh spawn
+        model.update(.starting)                    // update: fresh spawn
         #expect(model.display == .updating)
 
         model.update(.failed("Syncthing exited (code 1)"))

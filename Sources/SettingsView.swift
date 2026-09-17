@@ -88,6 +88,11 @@ struct SettingsView: View {
                     Text("Syncthing is")
                 }
                 .fixedSize()
+                // A Syncthing install stops and restarts the managed daemon; a
+                // mode switch in between would leave it spawning a daemon the
+                // app no longer expects (the mechanism also refuses such a
+                // start — this is the visible half of that invariant).
+                .disabled(syncthingSource.state.isInstalling)
 
                 switch daemonSettings.mode {
                 case .managed:

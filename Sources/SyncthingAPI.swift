@@ -37,8 +37,8 @@ struct SyncthingAPI: Equatable {
 
     /// The daemon options the client-side upgrade check mirrors: which releases
     /// feed the daemon would install from, and whether prereleases count. Reading
-    /// them from the daemon keeps our check and its `POST /rest/system/upgrade`
-    /// resolving releases from identical inputs. (The daemon's own
+    /// them from the daemon keeps our check resolving releases from the same
+    /// inputs the daemon's own upgrader would. (The daemon's
     /// `GET /rest/system/upgrade` is disabled by `STNOUPGRADE` — see
     /// `SyncthingReleases`.)
     struct UpgradeCheckOptions: Decodable, Equatable {
@@ -49,15 +49,6 @@ struct SyncthingAPI: Equatable {
     func upgradeCheckOptions() async throws -> UpgradeCheckOptions {
         let data = try await send("/rest/config/options", method: "GET")
         return try JSONDecoder().decode(UpgradeCheckOptions.self, from: data)
-    }
-
-    /// `POST /rest/system/upgrade` → upgrade to the latest available version and
-    /// restart. Used only on explicit user consent (majors are always gated).
-    /// Still served with `STNOUPGRADE` set (only the GET checks that flag —
-    /// verified live on v2.1.1); if a future daemon closes that asymmetry this
-    /// throws `.http(501)` and the install fails visibly.
-    func performUpgrade() async throws {
-        _ = try await send("/rest/system/upgrade", method: "POST")
     }
 
     /// `GET /rest/system/status` → this device's own ID (for filtering the local

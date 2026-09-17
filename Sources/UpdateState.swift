@@ -149,15 +149,56 @@ class UpdateSource: ObservableObject {
 
     /// The channel can now be checked. Reads the current version for the header and,
     /// when auto-check is on, checks immediately and begins polling.
+    ///
+    /// While an install is in flight the transition is DEFERRED to the install's
+    /// end (see `deferredAvailability`): the mechanism may take the channel's
+    /// backing down and up on purpose (the Syncthing channel stops and restarts
+    /// the daemon around its binary swap), and the card must read Updating…
+    /// throughout, not bounce through unchecked.
     func makeAvailable() {
-        isAvailable = true
+        guard !state.isInstalling else { deferredAvailability = true; return }
+        applyAvailability(true)
+    }
+
+    /// The channel can no longer be checked. Stops polling and resets to
+    /// unchecked. Deferred while an install is in flight, like `makeAvailable`.
+    func makeUnavailable() {
+        guard !state.isInstalling else { deferredAvailability = false; return }
+        applyAvailability(false)
+    }
+
+    /// The version whose install last failed. Auto-install skips it until the
+    /// next scheduled poll tick, so a persistently failing install costs one
+    /// attempt per poll interval — the cadence of Syncthing's own upgrade
+    /// scheduler — instead of a tight loop: every failed Syncthing install
+    /// restarts the previous daemon, and that availability bounce runs a fresh
+    /// check (`deferredAvailability`) which would otherwise auto-install the
+    /// same version again within seconds. The card still offers the version
+    /// and the Update button still works; only the automatic retry waits.
+    private var autoInstallSuppressedVersion: String?
+
+    /// The availability transition that arrived during an install, if any:
+    /// applied once the install ends, superseding whatever the outcome left in
+    /// `state` (a channel whose backing came back is re-armed with a fresh
+    /// check; one whose backing stayed down is unchecked). Only the last
+    /// transition matters — down-then-up is "up".
+    private var deferredAvailability: Bool?
+
+    /// The real transition behind `makeAvailable`/`makeUnavailable`.
+    private func applyAvailability(_ available: Bool) {
+        isAvailable = available
         epoch &+= 1
         checkInFlight = false
-        // A latched `.installing` can only be here because this availability
-        // bump superseded an in-flight install (the epoch guard makes its
-        // completion a no-op — e.g. an endpoint identity change during the
-        // settle window). Clear it or the card wedges: every check path guards
-        // on `!isInstalling`, and nothing else resets state on this path.
+        guard available else {
+            stopPolling()
+            currentVersion = nil
+            state = .unknown
+            return
+        }
+        // Re-arming after an install that ended with the channel still marked
+        // installing (the mechanism's success path leaves it so — see
+        // `installAvailable`): the fresh check below is what settles the card,
+        // and it only runs on a non-installing state.
         if state.isInstalling { state = .unknown }
         if settings.autoCheckEnabled {
             runCheck()
@@ -171,16 +212,6 @@ class UpdateSource: ObservableObject {
                 self.currentVersion = version
             }
         }
-    }
-
-    /// The channel can no longer be checked. Stops polling and resets to unchecked.
-    func makeUnavailable() {
-        isAvailable = false
-        epoch &+= 1
-        checkInFlight = false
-        stopPolling()
-        currentVersion = nil
-        state = .unknown
     }
 
     // MARK: - User actions
@@ -198,12 +229,15 @@ class UpdateSource: ObservableObject {
     /// (`UpdateDeclinedError`) restores the prior `.available` state, so the update
     /// stays offered. Installs are serialized app-wide: if another channel is
     /// mid-install this defers (the state stays `.available`), and the coordinator's
-    /// release re-evaluates it for auto-install. The claim is held through
-    /// `didApplyUpdate()` — deliberately not through the daemon's post-upgrade
-    /// re-root/reconnect: the reconnect's availability bounce is what settles the
-    /// card (`makeUnavailable` clears `.installing`, the fresh check lands on
-    /// Up to date), and a quit landing mid-re-root is already safe (a fresh spawn
-    /// *is* the re-root's whole purpose).
+    /// release re-evaluates it for auto-install.
+    ///
+    /// The install owns the channel from claim to release: availability changes
+    /// arriving meanwhile are deferred (`deferredAvailability`) and applied at
+    /// the end, so the epoch can't move under an install and the outcome lands
+    /// deterministically. Success leaves `.installing` unless a deferred
+    /// availability re-arms the channel — the app channel ends in a relaunch;
+    /// the Syncthing channel's daemon comes back and its fresh check settles the
+    /// card on Up to date.
     func installAvailable(userInitiated: Bool = true) {
         guard isAvailable, case .available = state else { return }
         guard coordinator.claim(self) else {
@@ -212,23 +246,25 @@ class UpdateSource: ObservableObject {
         }
         let offered = state
         state = .installing
-        let token = epoch
         Task { @MainActor in
-            defer { self.coordinator.release(self) }
             do {
                 try await self.applyUpdate(userInitiated: userInitiated)
             } catch is UpdateDeclinedError {
-                if self.epoch == token { self.state = offered }
-                return
+                self.state = offered
             } catch {
                 // The card resets to unchecked on failure; without this line the
                 // reason would vanish with it.
                 Log.updates.error("\(self.name, privacy: .public): install failed: \(String(describing: error), privacy: .public)")
-                if self.epoch == token { self.state = .unknown }
-                return
+                self.state = .unknown
+                if case let .available(version, _) = offered {
+                    self.autoInstallSuppressedVersion = version
+                }
             }
-            guard self.epoch == token else { return }
-            self.didApplyUpdate()
+            if let available = self.deferredAvailability {
+                self.deferredAvailability = nil
+                self.applyAvailability(available)
+            }
+            self.coordinator.release(self)
         }
     }
 
@@ -264,14 +300,20 @@ class UpdateSource: ObservableObject {
             if let version { self.currentVersion = version }
             self.settings.lastChecked = Date()
             self.state = result
-            if case let .available(_, isMajor) = result, self.shouldAutoInstall(isMajor: isMajor) {
+            if self.shouldAutoInstall(result) {
                 self.installAvailable(userInitiated: false)
             }
         }
     }
 
-    private func shouldAutoInstall(isMajor: Bool) -> Bool {
-        settings.autoInstallEffective && !(isMajor && gatesMajorUpdates)
+    /// Whether an offered update installs on its own: auto-install is on, the
+    /// update isn't a gated major, and it isn't the version whose install just
+    /// failed (`autoInstallSuppressedVersion`).
+    private func shouldAutoInstall(_ offered: UpdateState) -> Bool {
+        guard case let .available(version, isMajor) = offered else { return false }
+        return settings.autoInstallEffective
+            && !(isMajor && gatesMajorUpdates)
+            && version != autoInstallSuppressedVersion
     }
 
     private func autoCheckChanged(to enabled: Bool) {
@@ -280,9 +322,12 @@ class UpdateSource: ObservableObject {
             runCheck()
             startPolling()
         } else {
-            // An opted-out channel surfaces nothing until the user checks manually.
+            // An opted-out channel surfaces nothing until the user checks
+            // manually. An install in flight keeps its state: only the install
+            // itself ends `.installing` (the deferral of availability changes
+            // depends on that), and its end applies the opt-out's effect anyway.
             stopPolling()
-            state = .unknown
+            if !state.isInstalling { state = .unknown }
         }
     }
 
@@ -290,8 +335,15 @@ class UpdateSource: ObservableObject {
     /// Run when the auto-install toggle changes and when a cross-channel install
     /// finishes (releasing a deferred install).
     private func autoInstallIfEligible() {
-        guard case let .available(_, isMajor) = state, shouldAutoInstall(isMajor: isMajor) else { return }
+        guard shouldAutoInstall(state) else { return }
         installAvailable(userInitiated: false)
+    }
+
+    /// The scheduled poll: the one moment a failed install's version becomes
+    /// eligible for auto-install again.
+    private func pollTick() {
+        autoInstallSuppressedVersion = nil
+        checkNow()
     }
 
     // MARK: - Polling
@@ -308,7 +360,7 @@ class UpdateSource: ObservableObject {
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(wallDeadline: .now() + pollInterval, repeating: pollInterval,
                        leeway: Self.leeway(for: pollInterval))
-        timer.setEventHandler { [weak self] in self?.checkNow() }
+        timer.setEventHandler { [weak self] in self?.pollTick() }
         timer.resume()
         pollTimer = timer
     }
@@ -380,8 +432,6 @@ class UpdateSource: ObservableObject {
     /// only then.
     @MainActor func applyUpdate(userInitiated: Bool) async throws {}
 
-    /// Hook run after `applyUpdate()` succeeds (Syncthing re-roots its daemon here).
-    @MainActor func didApplyUpdate() {}
 
     /// The release-notes page for a version of this channel, if derivable.
     func releaseNotesURL(for version: String) -> URL? { nil }

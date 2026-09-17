@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Updating Syncthing no longer triggers a macOS permission prompt or breaks access to your folders.
+
 ## [1.0.0] - 2026-09-07
 
 Syncthing Menu 1.0 marks the app as stable. Nothing has changed since 0.4.0.

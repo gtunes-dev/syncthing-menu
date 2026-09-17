@@ -3,8 +3,8 @@ import CryptoKit
 
 /// Downloads the official Syncthing macOS binary from GitHub Releases, verifies
 /// it, and installs it into the app's private support directory — the initial
-/// "bootstrap". Ongoing updates are handled by the daemon itself (via its REST
-/// upgrade API), not here.
+/// "bootstrap". Ongoing updates go through Syncthing's own upgrader
+/// (`SyncthingProcess.upgradeBinary(from:)`), not here.
 ///
 /// Two verification layers: the SHA-256 published in `sha256sum.txt.asc`
 /// (integrity of the download), and the extracted binary's Developer-ID code
@@ -31,10 +31,16 @@ struct ReleaseUpdater {
     private static let releasesAPI =
         URL(string: "https://api.github.com/repos/syncthing/syncthing/releases/latest")!
 
-    /// Install the latest Syncthing binary if it isn't already present.
+    /// Install the latest Syncthing binary if it isn't already present. First
+    /// repairs an upgrade swap the last run left half-done (a quit mid-swap
+    /// leaves only `syncthing.old` — see `BinarySwap`), so a previous version
+    /// is preferred to a fresh download.
     @discardableResult
     func bootstrapIfNeeded() async throws -> URL {
         let target = Self.installedBinaryURL
+        if BinarySwap(binaryURL: target).recoverIfInterrupted() {
+            Log.updates.log("restored the previous Syncthing binary after an interrupted upgrade")
+        }
         if FileManager.default.isExecutableFile(atPath: target.path) {
             return target
         }

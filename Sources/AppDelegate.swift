@@ -170,15 +170,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // menu's lists, and the FDA section's alert state in Settings.
         syncthingMonitor.onChange = { [weak self] in self?.apply(snapshot: $0) }
 
-        // After an upgrade settles, re-root the daemon supervisor: a fresh spawn
-        // (new PID, fresh disclaim, canonical binary) ends the swap's TCC
-        // exposure — see SyncthingUpdateSource.onUpgradeApplied for the full
-        // story. The idle gate feeds the mechanism live activity so the POST
-        // lands on a quiet daemon (both observed `syncthing.old` permission
-        // incidents fired mid-scan).
-        syncthingUpdateSource.onUpgradeApplied = { [weak self] in
-            self?.syncthingProcess.restart()
-        }
+        // The Syncthing update mechanism sequences the managed daemon itself
+        // (stop → swap the binary while nothing runs → start → confirm; see
+        // SyncthingUpdateSource). The idle gate feeds it live activity so the
+        // stop lands on a quiet daemon.
+        syncthingUpdateSource.daemon = syncthingProcess
         syncthingUpdateSource.isDaemonBusy = { [weak self] in
             guard let self else { return false }
             return self.lastMonitorSnapshot.activity != .idle
@@ -197,7 +193,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     appUpdate: Self.pendingUpdate(appState, enabled: idle),
                     syncthingUpdate: Self.pendingUpdate(syncState, enabled: idle))
                 // The menu's status line says Updating… for the whole install
-                // window (quiesce → swap → re-root) instead of the phase churn.
+                // window (idle wait → stop → swap → start → confirm) instead of
+                // the phase churn.
                 self?.syncthingStatus.update(
                     updatingSyncthing: installing != nil
                         && installing === self?.syncthingUpdateSource)
@@ -275,12 +272,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // `shutdown` completes immediately when nothing is running (the
             // normal launch path); after a fast self-managed → managed flip it
             // waits out the reap so the fresh launch can't race the old spawn.
-            syncthingProcess.shutdown { [weak self] in
-                guard let self, self.modeGeneration == token else { return }
+            Task { @MainActor [weak self] in
+                guard let self, await self.syncthingProcess.shutdown() != nil,
+                      self.modeGeneration == token else { return }
                 self.launchDaemon()
             }
         case .selfManaged:
-            syncthingProcess.shutdown()
+            Task { @MainActor [weak self] in _ = await self?.syncthingProcess.shutdown() }
             lastConnectionIssue = .connecting
             daemonSession?.setEndpointExpected(true)
             pushStatus()
@@ -372,7 +370,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let url = try await releaseUpdater.bootstrapIfNeeded()
                 Log.app.log("Syncthing binary ready at \(url.path, privacy: .public)")
                 guard self.activeMode == .managed else { return }
-                self.syncthingProcess.start()
+                // A launch failure is already the process's `.failed` state
+                // (menu + log); a superseded launch is a quit or mode switch.
+                try? await self.syncthingProcess.start()
             } catch {
                 Log.app.error("Syncthing bootstrap failed: \(String(describing: error), privacy: .public)")
             }

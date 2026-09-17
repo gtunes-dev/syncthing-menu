@@ -124,7 +124,7 @@ final class StatusItemController: NSObject {
         if status.display == .updating {
             // Mid-update the phase churns through running/stopped/starting; a
             // flickering verb list — or a Start Syncthing offer while our own
-            // re-root is mid-flight — would be noise. One quiet line.
+            // stop → swap → start is mid-flight — would be noise. One quiet line.
             setDaemonVerbs(visible: false, canStart: false)
         } else {
             switch status.phase {
@@ -429,7 +429,9 @@ final class StatusItemController: NSObject {
     /// runs: the condition needs the user, and the icon is the only
     /// always-visible surface. Scanning and syncing share the one activity
     /// mark: the icon is a preattentive summary ("busy"), the texts carry the
-    /// distinction. Stopped/starting show the system-dimmed
+    /// distinction. Updating shows the up-arrow mark at full ink: the swap is
+    /// activity the app is performing, not an absence, even though the daemon
+    /// is down for part of it. Stopped/starting show the system-dimmed
     /// (`appearsDisabled`) idle mark — the native grammar for
     /// present-but-inactive, and it composes with the update arrow.
     private func refreshIcon() {
@@ -439,8 +441,9 @@ final class StatusItemController: NSObject {
         case .failed, .attention, .keyRejected: base = "Error"
         case .paused: base = "Paused"
         case .syncing, .scanning: base = "Syncing"
+        case .updating: base = "Updating"
         case .running: base = "Idle"
-        case .notRunning, .starting, .updating, .notConfigured, .connecting, .unreachable:
+        case .notRunning, .starting, .notConfigured, .connecting, .unreachable:
             base = "Idle"; dimmed = true
         }
         let name = "Status\(base)\(updateAvailable ? "Update" : "")"

@@ -62,9 +62,9 @@ final class SyncthingStatusModel: ObservableObject {
         case notRunning
         case starting
         case failed(String)
-        /// A Syncthing update is being applied (Settings shows Installing…).
-        /// Masks the update window's churn — quiesce wait, daemon self-restart,
-        /// our re-root's stop/start — behind one honest word. Never masks
+        /// A Syncthing update is being applied (Settings shows Updating…).
+        /// Masks the update window's churn — idle wait, our stop, the binary
+        /// swap, our start — behind one honest word. Never masks
         /// `.failed` (a spawn failure mid-update must surface) or the
         /// self-managed states (that channel never updates).
         case updating

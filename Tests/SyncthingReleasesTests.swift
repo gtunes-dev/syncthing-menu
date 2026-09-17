@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import SyncthingMenu
 
@@ -75,7 +76,9 @@ struct SyncthingReleasesTests {
     ]
 
     private static func release(_ tag: String, assetName: String) -> SyncthingReleases.Release {
-        .init(tag: tag, prerelease: tag.contains("-"), assets: [.init(name: assetName)])
+        .init(tag: tag, prerelease: tag.contains("-"),
+              assets: [.init(name: assetName,
+                             url: URL(string: "https://release.example/\(tag)/\(assetName)")!)])
     }
 
     @Test(arguments: selectionCases)

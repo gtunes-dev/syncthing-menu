@@ -34,8 +34,12 @@ fi
 ditto -x -k "$tmp/st.zip" "$tmp/x"
 bin="$(find "$tmp/x" -name syncthing -type f | head -1)"
 mkdir -p "$(dirname "$DEST")"
-cp "$bin" "$DEST"
-chmod +x "$DEST"
+# Replace via rename, never by writing over the existing file: rewriting an
+# executable's inode in place leaves the kernel's cached code-signing state
+# for that vnode stale, and the next exec is SIGKILLed with no log line.
+cp "$bin" "$DEST.tmp"
+chmod +x "$DEST.tmp"
+mv -f "$DEST.tmp" "$DEST"
 
 echo "pinned: $("$DEST" --version | head -1)"
 echo "Quit and relaunch Syncthing Menu to run this version."
