@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Updating Syncthing no longer triggers a macOS permission prompt or breaks access to your folders.
+- The menu bar icon shows an up arrow while Syncthing is updating instead of dimming.
 
 ## [1.0.0] - 2026-09-07
 
