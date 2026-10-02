@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Syncthing Menu is now signed with a renewed Apple developer certificate. Nothing else has changed.
+
 ## [1.0.1] - 2026-09-16
 
 ### Changed
